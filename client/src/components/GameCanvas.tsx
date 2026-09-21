@@ -273,7 +273,7 @@ export default function GameCanvas() {
       const p = canvasPoint(event);
       if (screen === "playing") {
         if (p.y > H - 135) {
-          if (p.x < 210) touch.left = true; else if (p.x < 425) touch.right = true; else if (p.x > 745) touch.jump = true;
+          if (p.x < 210) touch.left = true; else if (p.x < 425) touch.right = true; else if (p.x > 745) { touch.jump = true; pressed.jump = true; }
         } else if (p.x > W - 88 && p.y < 80) screen = "paused";
         else if (p.x > W - 160 && p.y > H - 95) screen = "paused";
         return;
