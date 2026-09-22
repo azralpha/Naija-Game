@@ -1,9 +1,8 @@
 import { useEffect, useRef } from "react";
 import { connectArena, type ArenaConnection, type ArenaLeaderboardEntry, type ArenaTrap, type RemotePlayer, type StreamerEvent } from "../game/online";
+import { getLevel, type WorldIndex } from "../game/levelData";
 
 type Screen = "title" | "worlds" | "arena" | "options" | "credits" | "playing" | "paused" | "dead" | "clear";
-type WorldIndex = 0 | 1 | 2 | 3;
-
 type Platform = { x: number; y: number; w: number; h: number; vanish?: boolean; color?: string };
 type HazardKind =
   | "spike"
@@ -18,6 +17,7 @@ type HazardKind =
   | "gravityFlip"
   | "multi"
   | "reverse"
+  | "teleporter"
   | "slide"
   | "awoof";
 type Hazard = {
@@ -29,6 +29,7 @@ type Hazard = {
   penalty: number;
   label: string;
   phase?: number;
+  originX?: number;
   triggered?: boolean;
 };
 type KeyPickup = { id: string; x: number; y: number; collected: boolean };
@@ -105,46 +106,22 @@ function rectsOverlap(a: { x: number; y: number; w: number; h: number }, b: { x:
   return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 }
 
-function stageFor(world: WorldIndex, save: SaveData): Stage {
-  const palette = world === 0 ? "#4f413c" : world === 1 ? "#5b262d" : "#2e3d51";
-  const floor = (x: number, y = 470, w = 320): Platform => ({ x, y, w, h: 42, color: palette });
-  const platforms: Platform[] = [
-    floor(0, 470, 300), { x: 370, y: 414, w: 132, h: 22, color: palette }, { x: 555, y: 350, w: 118, h: 22, color: palette },
-    { x: 720, y: 427, w: 166, h: 22, color: palette }, floor(950, 470, 248), { x: 1270, y: 394, w: 130, h: 22, color: palette },
-    { x: 1475, y: 330, w: 138, h: 22, color: palette }, floor(1700, 470, 292), { x: 2070, y: 390, w: 130, h: 22, color: palette },
-    { x: 2270, y: 322, w: 158, h: 22, color: palette }, floor(2500, 470, 330), { x: 2940, y: 410, w: 145, h: 22, color: palette },
-    { x: 3145, y: 348, w: 150, h: 22, color: palette }, floor(3380, 470, 470), { x: 3920, y: 390, w: 160, h: 22, color: palette },
+function stageFor(world: WorldIndex, level: number, save: SaveData): Stage {
+  const definition = getLevel(world, level);
+  const keys: KeyPickup[] = [
+    { id: `${world}-${level}-a`, x: 390, y: 350, collected: false },
+    { id: `${world}-${level}-b`, x: 720, y: 280, collected: false },
   ];
-  const hazards: Hazard[] = [
-    { kind: "spike", x: 292, y: 450, w: 76, h: 20, penalty: 50, label: "DIRTY GROUND" },
-    { kind: "falling", x: 615, y: 170, w: 30, h: 30, penalty: 70, label: "SMALL DROP", phase: 0.4 },
-    { kind: "disappear", x: 720, y: 427, w: 166, h: 22, penalty: 100, label: "SAPA FLOOR" },
-    { kind: "axe", x: 1100, y: 285, w: 48, h: 120, penalty: 150, label: "SWINGING BLADE", phase: 0.2 },
-    { kind: "fakeDoor", x: 1398, y: 342, w: 48, h: 70, penalty: 200, label: "FAKE DOOR" },
-    { kind: "movingWall", x: 1588, y: 318, w: 42, h: 152, penalty: 200, label: "MOVING WALL", phase: 0.8 },
-    { kind: "lateSpike", x: 1998, y: 450, w: 66, h: 20, penalty: 250, label: "GOD ABEG SPIKE" },
-    { kind: "blackout", x: 2206, y: 270, w: 64, h: 115, penalty: 200, label: "UP NEPA" },
-    { kind: "fakeJump", x: 2424, y: 430, w: 58, h: 40, penalty: 300, label: "POS DECLINE" },
-    { kind: "gravityFlip", x: 2828, y: 425, w: 110, h: 45, penalty: 300, label: "E CHOKE" },
-    { kind: "multi", x: 3295, y: 300, w: 84, h: 170, penalty: 300, label: "KATAKATA" },
-    { kind: "reverse", x: 3670, y: 425, w: 92, h: 45, penalty: 400, label: "VILLAGE PEOPLE" },
-    { kind: "awoof", x: 4080, y: 430, w: 88, h: 40, penalty: 500, label: "AWOOF PLATFORM" },
-  ];
-  if (world === 1) {
-    hazards.push({ kind: "spike", x: 1805, y: 450, w: 120, h: 20, penalty: 50, label: "RED SPIKE" });
-    hazards.push({ kind: "axe", x: 2690, y: 260, w: 52, h: 150, penalty: 150, label: "BIG BLADE", phase: 1.5 });
-  }
-  if (world === 2) {
-    hazards.push({ kind: "reverse", x: 860, y: 390, w: 100, h: 60, penalty: 400, label: "REVERSE CONTROLS" });
-    hazards.push({ kind: "gravityFlip", x: 1880, y: 380, w: 90, h: 90, penalty: 300, label: "GRAVITY FLIP" });
-    hazards.push({ kind: "multi", x: 3040, y: 260, w: 105, h: 210, penalty: 300, label: "KATAKATA ROOM" });
-  }
-  const rawKeys: KeyPickup[] = [
-    { id: `${world}-a`, x: 430, y: 365, collected: false }, { id: `${world}-b`, x: 1540, y: 280, collected: false },
-    { id: `${world}-c`, x: 2330, y: 270, collected: false }, { id: `${world}-d`, x: 3210, y: 295, collected: false },
-  ].slice(0, world === 0 ? 4 : 3);
-  rawKeys.forEach((key) => { key.collected = save.keyIds.includes(key.id); });
-  return { world, width: 4320, platforms, hazards, keys: rawKeys, exitX: 4180, spawn: { x: 70, y: 420 } };
+  keys.forEach((key) => { key.collected = save.keyIds.includes(key.id); });
+  return {
+    world,
+    width: definition.width,
+    platforms: definition.platforms,
+    hazards: definition.hazards.map((hazard) => ({ ...hazard, originX: hazard.x })) as Hazard[],
+    keys,
+    exitX: definition.exitX,
+    spawn: definition.spawn,
+  };
 }
 
 function createPlayer(stage: Stage): Player {
@@ -268,12 +245,13 @@ export default function GameCanvas() {
     let streamerEnabled = false;
     let streamerSource = "";
     let world: WorldIndex = 0;
+    let currentLevel = 1;
     let save = loadSave();
     let adminMode = save.adminMode;
     let adminToast = "";
     let adminToastUntil = 0;
     const titleTapTimes: number[] = [];
-    let stage = stageFor(world, save);
+    let stage = stageFor(world, currentLevel, save);
     let player = createPlayer(stage);
     let cameraX = 0;
     let last = performance.now();
@@ -395,10 +373,10 @@ export default function GameCanvas() {
       const trapType: ArenaTrap["trapType"] = arenaTraps.some((trap) => trap.ownerId === arenaConnection?.playerId && trap.trapType === "sapa_floor") ? (arenaTraps.some((trap) => trap.ownerId === arenaConnection?.playerId && trap.trapType === "shege_spike") ? "awoof_platform" : "shege_spike") : "sapa_floor";
       arenaConnection.socket.emit("place_trap", { x: player.x + 34, y: 448, trapType });
     };
-    const startGame = (selectedWorld: WorldIndex) => {
-      onlineMode = false; world = selectedWorld; stage = stageFor(world, save); player = createPlayer(stage); cameraX = 0; screen = "playing"; demoTime = 0; music.start();
+    const startGame = (selectedWorld: WorldIndex, selectedLevel = 1) => {
+      onlineMode = false; world = selectedWorld; currentLevel = selectedLevel; stage = stageFor(world, currentLevel, save); player = createPlayer(stage); cameraX = 0; screen = "playing"; demoTime = 0; music.start();
     };
-    const resetLevel = () => { stage = stageFor(world, save); player = createPlayer(stage); cameraX = 0; screen = "playing"; demoTime = 0; };
+    const resetLevel = () => { stage = stageFor(world, currentLevel, save); player = createPlayer(stage); cameraX = 0; screen = "playing"; demoTime = 0; };
     const skipLevel = () => {
       if (!adminMode || onlineMode) return;
       player.x = stage.exitX;
@@ -417,9 +395,13 @@ export default function GameCanvas() {
       screen = "dead"; shake = 10; music.blip(110, 0.18);
     };
     const clearLevel = () => {
-      save.debt = Math.max(0, save.debt - 2000); if (world < 2) save.unlocked = Math.max(save.unlocked, world + 1); persist(save);
-      clearMessage = world === 0 ? "You don graduate from Sapa Nation. Welcome to Shege Pro Max." : CLEAR_MESSAGES[Math.floor(Math.random() * CLEAR_MESSAGES.length)];
-      clearUntil = performance.now() + 7000; screen = "clear"; music.blip(740, 0.18);
+      save.debt = Math.max(0, save.debt - 2000);
+      if (currentLevel < 10) currentLevel += 1;
+      else if (world < 3) { save.unlocked = Math.max(save.unlocked, world + 1); world = (world + 1) as WorldIndex; currentLevel = 1; }
+      persist(save);
+      stage = stageFor(world, currentLevel, save); player = createPlayer(stage); cameraX = 0;
+      clearMessage = `JAPA DOOR CLEARED · WORLD ${world + 1} // LEVEL ${currentLevel}`;
+      clearUntil = performance.now() + 1800; screen = "playing"; music.blip(740, 0.18);
     };
     const goBack = () => { screen = screen === "playing" || screen === "paused" || screen === "dead" ? "worlds" : "title"; };
 
@@ -442,7 +424,7 @@ export default function GameCanvas() {
         else if (p.y > 350 && p.y < 405) screen = "options";
         else if (p.y > 410 && p.y < 465) screen = "credits";
       } else if (screen === "arena") {
-        if (p.y > 260 && p.y < 325) { world = 0; stage = stageFor(world, save); player = createPlayer(stage); screen = "playing"; arenaNotice = "Arena live. Sabotage tokens ready."; }
+        if (p.y > 260 && p.y < 325) { world = 0; currentLevel = 1; stage = stageFor(world, currentLevel, save); player = createPlayer(stage); screen = "playing"; arenaNotice = "Arena live. Sabotage tokens ready."; }
         else if (p.y > 345 && p.y < 405) void configureStreamer();
         else if (p.y > 435) leaveArena();
       } else if (screen === "worlds") {
@@ -522,7 +504,7 @@ export default function GameCanvas() {
       for (const hazard of stage.hazards) {
         if (hazard.kind === "falling") hazard.y = 155 + Math.abs(Math.sin(elapsed * 2 + (hazard.phase || 0))) * 125;
         if (hazard.kind === "axe") hazard.phase = (hazard.phase || 0) + dt * 4;
-        if (hazard.kind === "movingWall") hazard.x = 1588 + Math.sin(elapsed * 1.4) * 80;
+        if (hazard.kind === "movingWall") hazard.x = (hazard.originX ?? hazard.x) + Math.sin(elapsed * 1.4 + (hazard.phase || 0)) * 42;
         if (hazard.kind === "lateSpike" && standStill > 1.1) hazard.triggered = true;
         if (hazard.kind === "disappear" && rectsOverlap(player, hazard) && player.grounded) { hazard.triggered = true; }
         const box = hazard.kind === "axe" ? { x: hazard.x - 18, y: hazard.y, w: hazard.w + 36, h: hazard.h } : hazard;
@@ -531,7 +513,8 @@ export default function GameCanvas() {
         if (hazard.kind === "gravityFlip" && rectsOverlap(player, box)) { gravityFlipUntil = now + 1200; die(hazard); }
         if (hazard.kind === "disappear" && hazard.triggered && rectsOverlap(player, { ...hazard, y: hazard.y - 4 })) die(hazard);
         if (hazard.kind === "lateSpike" && hazard.triggered && rectsOverlap(player, { ...hazard, y: hazard.y - 10 })) die(hazard);
-        if (hazard.kind !== "reverse" && hazard.kind !== "blackout" && hazard.kind !== "gravityFlip" && hazard.kind !== "disappear" && hazard.kind !== "lateSpike" && rectsOverlap(player, box)) die(hazard);
+        if (hazard.kind === "teleporter" && !hazard.triggered && rectsOverlap(player, box)) { hazard.triggered = true; player.x = Math.max(0, stage.exitX - 92); player.y = stage.spawn.y; music.blip(1040, 0.12); }
+        if (hazard.kind !== "reverse" && hazard.kind !== "blackout" && hazard.kind !== "gravityFlip" && hazard.kind !== "disappear" && hazard.kind !== "lateSpike" && hazard.kind !== "teleporter" && rectsOverlap(player, box)) die(hazard);
       }
       if (onlineMode && arenaConnection) {
         for (const trap of arenaTraps) {
@@ -559,7 +542,7 @@ export default function GameCanvas() {
     };
 
     const drawBackground = () => {
-      const palettes = world === 0 ? ["#101316", "#1e2528", "#3a302c"] : world === 1 ? ["#190f15", "#451b27", "#762b32"] : ["#111a25", "#26344a", "#4b2d4f"];
+      const palettes = world === 0 ? ["#101316", "#1e2528", "#3a302c"] : world === 1 ? ["#190f15", "#451b27", "#762b32"] : world === 2 ? ["#111a25", "#26344a", "#4b2d4f"] : ["#171329", "#362650", "#5d3e77"];
       const grad = ctx.createLinearGradient(0, 0, 0, H); grad.addColorStop(0, palettes[0]); grad.addColorStop(0.55, palettes[1]); grad.addColorStop(1, palettes[2]); ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
       ctx.globalAlpha = 0.18;
       for (let i = 0; i < 18; i += 1) { const x = (i * 83 - cameraX * 0.18) % (W + 100); const y = 130 + ((i * 71) % 220); ctx.fillStyle = i % 2 ? "#9db5a1" : "#d7a26f"; ctx.fillRect(x, y, 28 + (i % 4) * 9, 3); ctx.fillRect(x + 9, y - 18, 3, 18); }
@@ -610,6 +593,8 @@ export default function GameCanvas() {
           ctx.fillStyle = "#3ca77b"; ctx.fillRect(hazard.x, hazard.y, hazard.w, hazard.h); drawText(ctx, "← →", hazard.x + hazard.w / 2, hazard.y + 22, 15, "#12231c", "center", "DM Mono");
         } else if (hazard.kind === "awoof") {
           ctx.fillStyle = "#7ba961"; ctx.fillRect(hazard.x, hazard.y, hazard.w, hazard.h); ctx.fillStyle = "#f7e4a0"; ctx.fillRect(hazard.x + 12, hazard.y + 8, hazard.w - 24, 5); drawText(ctx, "AWOOF", hazard.x + hazard.w / 2, hazard.y + 26, 10, "#1c3022", "center", "DM Mono");
+        } else if (hazard.kind === "teleporter") {
+          ctx.fillStyle = "#5e42a1"; ctx.fillRect(hazard.x, hazard.y, hazard.w, hazard.h); ctx.fillStyle = "#cbb7ff"; ctx.fillRect(hazard.x + 8, hazard.y + 8, hazard.w - 16, hazard.h - 16); drawText(ctx, "JAPA", hazard.x + hazard.w / 2, hazard.y + hazard.h / 2, 10, "#28183f", "center", "DM Mono");
         }
       }
       // Exit door and route markers
@@ -631,7 +616,8 @@ export default function GameCanvas() {
       ctx.restore();
       // HUD
       ctx.fillStyle = "rgba(7,8,10,.88)"; ctx.fillRect(0, 0, W, 64); ctx.fillStyle = WORLD_COLORS[world]; ctx.fillRect(0, 61, W, 3);
-      drawText(ctx, `WORLD 0${world + 1}`, 24, 19, 12, "#a6ada7", "left", "DM Mono"); drawText(ctx, WORLD_NAMES[world].toUpperCase(), 24, 42, 16, "#f7f1e6", "left", "Space Grotesk");
+      drawText(ctx, `WORLD ${world + 1} // LEVEL ${currentLevel}`, 24, 18, 12, "#a6ada7", "left", "DM Mono"); drawText(ctx, WORLD_NAMES[world].toUpperCase(), 24, 42, 16, "#f7f1e6", "left", "Space Grotesk");
+      drawText(ctx, `[${"■".repeat(currentLevel)}${"□".repeat(10 - currentLevel)}]`, 260, 29, 14, WORLD_COLORS[world], "left", "DM Mono");
       drawText(ctx, `GBESE  ₦${save.debt.toLocaleString("en-NG")}`, 450, 27, 16, "#f5d078", "center", "DM Mono"); drawText(ctx, `JAPA KEYS  ${save.keys}/10`, 790, 27, 14, "#72d88b", "center", "DM Mono");
       drawText(ctx, "Ⅱ", 930, 28, 19, "#f7f1e6", "center", "DM Mono");
       if (now < reverseUntil) { ctx.fillStyle = "rgba(38,165,115,.9)"; ctx.fillRect(326, 74, 308, 32); drawText(ctx, "VILLAGE PEOPLE: CONTROLS REVERSED", 480, 90, 12, "#07120e", "center", "DM Mono"); }
@@ -668,7 +654,7 @@ export default function GameCanvas() {
       drawButton(ctx, "JAPA FROM ARENA", 72, 455, 210, 42, "#73858b", true);
     };
     const drawWorlds = () => {
-      drawOverlay(); drawText(ctx, "SELECT YOUR WAHALA", 70, 68, 32, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "three zones of increasing disrespect", 72, 101, 13, "#8e978c", "left", "DM Mono");
+      drawOverlay(); drawText(ctx, "SELECT YOUR WAHALA", 70, 68, 32, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "four worlds · ten fixed rooms each · increasing disrespect", 72, 101, 13, "#8e978c", "left", "DM Mono");
       for (let i = 0; i < 4; i += 1) {
         const x = 70 + i * 220; const locked = i > save.unlocked; const accent = WORLD_COLORS[i] || "#626865";
         ctx.fillStyle = locked ? "rgba(27,30,31,.75)" : "rgba(20,24,24,.96)"; ctx.fillRect(x, 150, 195, 245); ctx.strokeStyle = accent; ctx.lineWidth = 2; ctx.strokeRect(x + 1, 151, 193, 243); ctx.fillStyle = accent; ctx.fillRect(x, 150, 195, 8);
