@@ -228,24 +228,29 @@ function drawButton(ctx: CanvasRenderingContext2D, label: string, x: number, y: 
   ctx.restore();
 }
 
-function drawAvatar(ctx: CanvasRenderingContext2D, x: number, y: number, scale: number, wardrobe: typeof DEFAULT_WARDROBE, name?: string) {
+function drawPixelBoy(ctx: CanvasRenderingContext2D, x: number, y: number, scale: number, wardrobe: typeof DEFAULT_WARDROBE, name?: string, pose: "idle" | "run" | "jump" = "idle", phase = 0) {
   const top = itemById(wardrobe.topId) || GROUP_A_TOPS[3];
   const bottom = itemById(wardrobe.bottomId) || GROUP_A_BOTTOMS[2];
-  ctx.save();
-  // White/grayscale base silhouette first; wardrobe colors are tint layers over the same base sprite.
-  ctx.fillStyle = "#12161c"; ctx.fillRect(x - 2 * scale, y + 7 * scale, 20 * scale, 18 * scale);
-  ctx.fillStyle = "#e7a56e"; ctx.fillRect(x + 3 * scale, y, 11 * scale, 9 * scale);
-  ctx.fillStyle = "#141518"; ctx.fillRect(x + 2 * scale, y - 2 * scale, 13 * scale, 4 * scale);
-  ctx.fillStyle = top.color; ctx.fillRect(x + 1 * scale, y + 9 * scale, 14 * scale, 11 * scale);
-  ctx.fillStyle = bottom.color; ctx.fillRect(x + 1 * scale, y + 19 * scale, 14 * scale, 7 * scale);
-  ctx.fillStyle = "#f3ddba"; ctx.fillRect(x + 2 * scale, y + 21 * scale, 5 * scale, 5 * scale); ctx.fillRect(x + 10 * scale, y + 21 * scale, 5 * scale, 5 * scale);
-  if (top.group === "B" || bottom.group === "B") { ctx.globalAlpha = 0.34; ctx.fillStyle = "#ffffff"; ctx.fillRect(x + 2 * scale, y + 10 * scale, 11 * scale, 2 * scale); ctx.globalAlpha = 1; }
-  if (name) {
-    const label = `${wardrobe.titleBadge ? `[${wardrobe.titleBadge}] ` : ""}${name}`;
-    ctx.font = `${Math.max(9, Math.round(10 * scale))}px DM Mono`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    if (wardrobe.nameGlow) { ctx.shadowColor = "#f6d365"; ctx.shadowBlur = 9; }
-    ctx.fillStyle = wardrobe.nameGlow ? "#ffe7a0" : "#f7f1e6"; ctx.fillText(label.slice(0, 24), x + 7 * scale, y - 14 * scale);
-  }
+  const skin = "#9b593b"; const skinLight = "#c8794d"; const skinShadow = "#6f392c"; const hair = "#171719"; const hairLight = "#2c292b"; const white = "#f4eee1"; const shoe = "#20252a";
+  const px = (xx: number, yy: number, ww: number, hh: number, color: string) => { ctx.fillStyle = color; ctx.fillRect(x + xx * scale, y + yy * scale, ww * scale, hh * scale); };
+  const run = pose === "run"; const jump = pose === "jump"; const swing = run ? (Math.sin(phase * 11) > 0 ? 1 : -1) : 0;
+  const armFront = jump ? -4 : swing * 3; const armBack = jump ? -2 : -swing * 2; const legFront = jump ? -3 : swing * 2; const legBack = jump ? 2 : -swing * 2;
+  ctx.save(); ctx.imageSmoothingEnabled = false;
+  // 32×32 constant grayscale/base character: afro, profile face, eye, ear and nose.
+  px(9, 2, 13, 2, hair); px(6, 5, 20, 4, hair); px(5, 8, 22, 3, hair); px(8, 3, 4, 2, hairLight); px(15, 2, 4, 2, hairLight); px(22, 5, 5, 3, hairLight); px(4, 7, 3, 3, hairLight);
+  px(9, 10, 16, 7, skin); px(11, 9, 12, 2, skinLight); px(8, 11, 3, 4, skinShadow); px(25, 12, 3, 2, skinLight); px(26, 14, 2, 2, skinShadow); // ear + profile nose
+  px(20, 11, 2, 2, white); px(21, 11, 1, 1, "#141518"); px(24, 16, 3, 1, skinShadow); px(12, 16, 10, 2, skinShadow); // eye and mouth
+  px(13, 17, 7, 2, skinLight); // neck
+  // Shirt is the only upper-body region tinted by the wardrobe.
+  px(10, 18, 13, 2, top.color); px(8, 20, 17, 4, top.color); px(10, 24, 13, 1, top.color); px(11, 19, 2, 2, top.group === "B" ? "rgba(255,255,255,.55)" : skinLight);
+  // Distinct arms and hands, animated independently of the clothing.
+  px(6, 19 + armBack, 3, 6, skin); px(5, 24 + armBack, 3, 2, skinLight); px(23, 19 + armFront, 3, 6, skin); px(25, 24 + armFront, 3, 2, skinLight);
+  // Shorts are the only lower-body region tinted by the wardrobe.
+  px(10, 24, 13, 4, bottom.color); px(12, 27, 3, 2, bottom.color); px(18, 27, 3, 2, bottom.color); if (bottom.group === "B") { px(11, 25, 10, 1, "rgba(255,255,255,.5)"); }
+  // Legs, socks and sneakers with pixel soles/laces.
+  px(11 + legBack, 28, 4, 3, skin); px(18 + legFront, 28, 4, 3, skin); px(10 + legBack, 30, 7, 2, shoe); px(18 + legFront, 30, 8, 2, shoe); px(11 + legBack, 29, 3, 1, white); px(20 + legFront, 29, 3, 1, white); px(9 + legBack, 32, 8, 1, "#0e1115"); px(18 + legFront, 32, 9, 1, "#0e1115");
+  if (jump) { px(7, 18, 3, 3, skinLight); px(23, 17, 3, 3, skinLight); }
+  if (name) { const label = `${wardrobe.titleBadge ? `[${wardrobe.titleBadge}] ` : ""}${name}`; ctx.font = "10px DM Mono"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; if (wardrobe.nameGlow) { ctx.shadowColor = "#f6d365"; ctx.shadowBlur = 9; } ctx.fillStyle = wardrobe.nameGlow ? "#ffe7a0" : "#f7f1e6"; ctx.fillText(label.slice(0, 24), x + 16 * scale, y - 7 * scale); }
   ctx.restore();
 }
 
@@ -673,12 +678,12 @@ export default function GameCanvas() {
       }
       // Exit door and route markers
       ctx.fillStyle = "#123d2c"; ctx.fillRect(stage.exitX, 390, 58, 80); ctx.fillStyle = "#62d477"; ctx.fillRect(stage.exitX + 7, 397, 44, 73); ctx.fillStyle = "#dff6af"; ctx.fillRect(stage.exitX + 13, 406, 32, 51); ctx.fillStyle = "#1d4d34"; ctx.fillRect(stage.exitX + 37, 431, 4, 4); drawText(ctx, "JAPA", stage.exitX + 29, 382, 11, "#8ce49a", "center", "DM Mono");
-      // Player: one grayscale base silhouette, tinted by the isolated wardrobe group.
-      drawAvatar(ctx, player.x, player.y, 1, save.wardrobe, save.wardrobe.username);
+      // Player: detailed 32×32 pixel character, tinted only in shirt and shorts regions.
+      const playerPose: "idle" | "run" | "jump" = !player.grounded ? "jump" : Math.abs(player.vx) > 40 ? "run" : "idle";
+      drawPixelBoy(ctx, player.x - 8, player.y - 7, 1, save.wardrobe, save.wardrobe.username, playerPose, elapsed);
       if (onlineMode) {
         for (const remote of remotePlayers) {
-          ctx.globalAlpha = 0.58; ctx.fillStyle = "#5cc7b2"; ctx.fillRect(remote.x - 2, remote.y + 7, 20, 18); ctx.fillStyle = "#d49b76"; ctx.fillRect(remote.x + 3, remote.y, 11, 9); ctx.fillStyle = "#23786d"; ctx.fillRect(remote.x + 1, remote.y + 9, 14, 11); ctx.globalAlpha = 1;
-          drawText(ctx, remote.name, remote.x + 8, remote.y - 12, 9, "#a8f1d2", "center", "DM Mono");
+          ctx.globalAlpha = 0.58; drawPixelBoy(ctx, remote.x - 8, remote.y - 7, 1, DEFAULT_WARDROBE, remote.name, remote.jumping ? "jump" : "idle", elapsed); ctx.globalAlpha = 1;
         }
         for (const trap of arenaTraps) {
           ctx.globalAlpha = 0.9; ctx.fillStyle = trap.ownerId === arenaConnection?.playerId ? "#f3c75a" : "#e65c4b";
@@ -762,7 +767,7 @@ export default function GameCanvas() {
       const items = wardrobeItems();
       const drawItem = (item: WardrobeItem, index: number, y: number) => { const x = 60 + (index % 4) * 145; const yy = y + Math.floor(index / 4) * 48; const unlocked = isUnlocked(item, save.wardrobe); const selected = item.id === save.wardrobe.topId || item.id === save.wardrobe.bottomId; ctx.fillStyle = selected ? "rgba(57,87,62,.95)" : "rgba(18,22,24,.95)"; ctx.fillRect(x, yy, 132, 39); ctx.strokeStyle = unlocked ? item.color : "#555d58"; ctx.strokeRect(x + 1, yy + 1, 130, 37); ctx.fillStyle = item.color; ctx.fillRect(x + 8, yy + 11, 16, 16); drawText(ctx, unlocked ? item.label.replace(" Shorts", "") : `₦${item.price}`, x + 31, yy + 13, 9, unlocked ? "#f7f1e6" : "#8b938b", "left", "DM Mono"); drawText(ctx, selected ? "EQUIPPED" : unlocked ? "EQUIP" : "UNLOCK", x + 31, yy + 28, 8, unlocked ? item.color : "#8b938b", "left", "DM Mono"); };
       drawText(ctx, "TOPS", 60, 148, 10, "#a4ada2", "left", "DM Mono"); items.tops.forEach((item, index) => drawItem(item, index, 158)); drawText(ctx, "BOTTOMS", 60, bottomBase - 10, 10, "#a4ada2", "left", "DM Mono"); items.bottoms.forEach((item, index) => drawItem(item, index, bottomBase));
-      ctx.fillStyle = "rgba(19,22,24,.96)"; ctx.fillRect(675, 112, 225, 250); ctx.strokeStyle = String(activeTab) === "B" ? "#f0c86b" : "#72c67f"; ctx.strokeRect(676, 113, 223, 248); drawText(ctx, "LIVE FIT CHECK", 787, 136, 11, "#aeb6a9", "center", "DM Mono"); drawAvatar(ctx, 780, 205, 5, save.wardrobe); drawText(ctx, save.wardrobe.titleBadge ? `[${save.wardrobe.titleBadge}] ${save.wardrobe.username}` : save.wardrobe.username, 787, 300, 11, save.wardrobe.nameGlow ? "#ffe7a0" : "#f7f1e6", "center", "DM Mono");
+      ctx.fillStyle = "rgba(19,22,24,.96)"; ctx.fillRect(675, 112, 225, 250); ctx.strokeStyle = String(activeTab) === "B" ? "#f0c86b" : "#72c67f"; ctx.strokeRect(676, 113, 223, 248); drawText(ctx, "LIVE FIT CHECK", 787, 136, 11, "#aeb6a9", "center", "DM Mono"); drawPixelBoy(ctx, 700, 165, 5, save.wardrobe); drawText(ctx, save.wardrobe.titleBadge ? `[${save.wardrobe.titleBadge}] ${save.wardrobe.username}` : save.wardrobe.username, 787, 300, 11, save.wardrobe.nameGlow ? "#ffe7a0" : "#f7f1e6", "center", "DM Mono");
       drawButton(ctx, `TITLE BADGE  //  ${save.wardrobe.titleBadge || (save.wardrobe.titleBadgeUnlocked ? "NONE" : "₦200")}`, 675, 330, 225, 32, save.wardrobe.titleBadgeUnlocked ? "#72c67f" : "#f0c86b", true); drawButton(ctx, "EDIT GAMER USERNAME", 675, 375, 225, 38, "#72c67f", true); drawButton(ctx, `GOLDEN NAME GLOW  //  ${save.wardrobe.nameGlow ? "ON" : "OFF"}`, 675, 420, 225, 38, save.wardrobe.nameGlow ? "#f0c86b" : "#73858b", true); drawButton(ctx, save.wardrobe.bundleUnlocked ? "OGA BOSS BUNDLE  //  UNLOCKED" : "OGA BOSS BUNDLE  //  ₦2,000", 675, 465, 225, 38, "#b78cff", true); drawText(ctx, `GBESE AVAILABLE  ₦${save.debt.toLocaleString("en-NG")}`, 60, 485, 11, "#f3cc65", "left", "DM Mono"); drawButton(ctx, "BACK TO SETTINGS", 60, 505, 190, 28, "#73858b", true);
     };
     const drawCredits = () => { drawOverlay(); drawText(ctx, "PEOPLE WEY HELP BUILD THIS SHEGE", 74, 58, 26, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "A tiny arcade built with big wahala.", 76, 88, 12, "#8e978c", "left", "DM Mono"); drawText(ctx, "DESIGN", 80, 132, 11, "#72c67f", "left", "DM Mono"); drawText(ctx, "You + The Village People", 80, 153, 16, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "ENGINE", 80, 190, 11, "#c7a657", "left", "DM Mono"); drawText(ctx, "Canvas API · Vite · React · TypeScript", 80, 211, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Web Audio API · Express + Socket.io", 80, 231, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "MUSIC", 80, 270, 11, "#73858b", "left", "DM Mono"); drawText(ctx, "Chiptune + Fuji · Afro-Beats Rush", 80, 291, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Street-Pop Chaos", 80, 311, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Frantic Talking Drum Dept.", 80, 331, 12, "#a5aaa1", "left", "DM Mono"); drawText(ctx, "DEVELOPER", 80, 370, 11, "#e65c4b", "left", "DM Mono"); drawText(ctx, "Azamen (Alpha Collective Corporation)", 80, 394, 17, "#f7f1e6", "left", "Space Grotesk"); drawButton(ctx, "BACK TO MENU", 80, 454, 188, 42, "#73858b", true); };
