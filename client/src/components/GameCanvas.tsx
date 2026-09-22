@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
+import { connectArena, type ArenaConnection, type ArenaLeaderboardEntry, type ArenaTrap, type RemotePlayer, type StreamerEvent } from "../game/online";
 
-type Screen = "title" | "worlds" | "options" | "credits" | "playing" | "paused" | "dead" | "clear";
+type Screen = "title" | "worlds" | "arena" | "options" | "credits" | "playing" | "paused" | "dead" | "clear";
 type WorldIndex = 0 | 1 | 2;
 
 type Platform = { x: number; y: number; w: number; h: number; vanish?: boolean; color?: string };
@@ -212,6 +213,14 @@ export default function GameCanvas() {
     canvas.width = W; canvas.height = H; ctx.imageSmoothingEnabled = false;
 
     let screen: Screen = new URLSearchParams(window.location.search).has("demo") ? "playing" : "title";
+    let onlineMode = false;
+    let arenaConnection: ArenaConnection | null = null;
+    let remotePlayers: RemotePlayer[] = [];
+    let arenaTraps: ArenaTrap[] = [];
+    let leaderboard: ArenaLeaderboardEntry[] = [];
+    let arenaNotice = "Tap Online Arena to find a room.";
+    let streamerEnabled = false;
+    let streamerSource = "";
     let world: WorldIndex = 0;
     let save = loadSave();
     let stage = stageFor(world, save);
@@ -233,6 +242,7 @@ export default function GameCanvas() {
     let standStill = 0;
     let demo = new URLSearchParams(window.location.search).has("demo");
     let demoTime = 0;
+    let networkAccumulator = 0;
     const keysDown = new Set<string>();
     const touch = { left: false, right: false, jump: false };
     const pressed = { jump: false };
@@ -251,8 +261,54 @@ export default function GameCanvas() {
       const rect = canvas.getBoundingClientRect();
       return { x: ((event.clientX - rect.left) / rect.width) * W, y: ((event.clientY - rect.top) / rect.height) * H };
     };
+    const onStreamerEvent = (event: StreamerEvent) => {
+      if (event.command === "upnepa") blackoutUntil = performance.now() + 2000;
+      if (event.command === "echoke") gravityFlipUntil = performance.now() + 1600;
+      if (event.command === "villagepeople") reverseUntil = performance.now() + 5000;
+      if (event.command === "godabeg") fakeJumpUntil = performance.now() + 2200;
+      arenaNotice = `STREAMER WAHALA: !${event.command}`;
+    };
+    const activateConfiguredStreamer = async () => {
+      if (!arenaConnection || !streamerSource) return;
+      const payload = streamerSource.startsWith("@") ? { roomId: arenaConnection.roomId, channelHandle: streamerSource } : { roomId: arenaConnection.roomId, videoId: streamerSource };
+      try {
+        const response = await fetch("/api/streamer/connect", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+        const data = await response.json() as { ok?: boolean; error?: string };
+        arenaNotice = data.ok ? "YouTube chat connected. Commands are live." : data.error || "Streamer connection failed.";
+      } catch { arenaNotice = "Streamer API unavailable in this preview."; }
+    };
+    const enterArena = () => {
+      onlineMode = true; screen = "arena"; music.start(); arenaConnection?.leave();
+      arenaConnection = connectArena({
+        playerName: `NNL-${Math.floor(Math.random() * 900 + 100)}`,
+        onRoom: (payload) => { arenaNotice = `Room ${payload.roomId} · ${payload.players.length}/50 connected`; remotePlayers = payload.players.filter((remote) => remote.id !== payload.playerId); void activateConfiguredStreamer(); },
+        onPlayers: (players) => { remotePlayers = players.filter((remote) => remote.id !== arenaConnection?.playerId); },
+        onTrap: (trap) => { arenaTraps = [...arenaTraps.filter((existing) => existing.id !== trap.id), trap]; },
+        onLeaderboard: (entries) => { leaderboard = entries; },
+        onStreamerEvent,
+        onNotice: (message) => { arenaNotice = message; },
+      });
+    };
+    const leaveArena = () => { arenaConnection?.leave(); arenaConnection = null; onlineMode = false; remotePlayers = []; arenaTraps = []; leaderboard = []; screen = "title"; };
+    const configureStreamer = async () => {
+      const source = window.prompt("YouTube Live Video ID or @channel handle", streamerSource);
+      if (!source) return;
+      streamerSource = source.trim(); streamerEnabled = true;
+      if (!arenaConnection) { arenaNotice = "Streamer source saved. Join an arena to activate chat."; return; }
+      const payload = streamerSource.startsWith("@") ? { roomId: arenaConnection.roomId, channelHandle: streamerSource } : { roomId: arenaConnection.roomId, videoId: streamerSource };
+      try {
+        const response = await fetch("/api/streamer/connect", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+        const data = await response.json() as { ok?: boolean; error?: string };
+        arenaNotice = data.ok ? "YouTube chat connected. Commands are live." : data.error || "Streamer connection failed.";
+      } catch { arenaNotice = "Streamer API unavailable in this preview."; }
+    };
+    const placeTrap = () => {
+      if (!onlineMode || !arenaConnection) return;
+      const trapType: ArenaTrap["trapType"] = arenaTraps.some((trap) => trap.ownerId === arenaConnection?.playerId && trap.trapType === "sapa_floor") ? (arenaTraps.some((trap) => trap.ownerId === arenaConnection?.playerId && trap.trapType === "shege_spike") ? "awoof_platform" : "shege_spike") : "sapa_floor";
+      arenaConnection.socket.emit("place_trap", { x: player.x + 34, y: 448, trapType });
+    };
     const startGame = (selectedWorld: WorldIndex) => {
-      world = selectedWorld; stage = stageFor(world, save); player = createPlayer(stage); cameraX = 0; screen = "playing"; demoTime = 0; music.start();
+      onlineMode = false; world = selectedWorld; stage = stageFor(world, save); player = createPlayer(stage); cameraX = 0; screen = "playing"; demoTime = 0; music.start();
     };
     const resetLevel = () => { stage = stageFor(world, save); player = createPlayer(stage); cameraX = 0; screen = "playing"; demoTime = 0; };
     const die = (hazard: Hazard | { penalty: number; label: string }) => {
@@ -273,22 +329,28 @@ export default function GameCanvas() {
       const p = canvasPoint(event);
       if (screen === "playing") {
         if (p.y > H - 135) {
-          if (p.x < 210) touch.left = true; else if (p.x < 425) touch.right = true; else if (p.x > 745) { touch.jump = true; pressed.jump = true; }
+          if (p.x < 210) touch.left = true; else if (p.x < 425) touch.right = true; else if (onlineMode && p.x > 500 && p.x < 720) placeTrap(); else if (p.x > 745) { touch.jump = true; pressed.jump = true; }
         } else if (p.x > W - 88 && p.y < 80) screen = "paused";
         else if (p.x > W - 160 && p.y > H - 95) screen = "paused";
         return;
       }
       if (screen === "title") {
-        if (p.y > 285 && p.y < 345) screen = "worlds";
+        if (p.x > 520 && p.y > 300 && p.y < 390) enterArena();
+        else if (p.y > 285 && p.y < 345) screen = "worlds";
         else if (p.y > 350 && p.y < 405) screen = "options";
         else if (p.y > 410 && p.y < 465) screen = "credits";
+      } else if (screen === "arena") {
+        if (p.y > 260 && p.y < 325) { world = 0; stage = stageFor(world, save); player = createPlayer(stage); screen = "playing"; arenaNotice = "Arena live. Sabotage tokens ready."; }
+        else if (p.y > 345 && p.y < 405) void configureStreamer();
+        else if (p.y > 435) leaveArena();
       } else if (screen === "worlds") {
         if (p.y > 145 && p.y < 350) {
           const pick = Math.floor((p.x - 70) / 220) as WorldIndex;
           if (pick >= 0 && pick <= 2 && pick <= save.unlocked) startGame(pick);
         } else if (p.y > 450) screen = "title";
       } else if (screen === "options" || screen === "credits") {
-        if (p.y > 440) screen = "title";
+        if (screen === "options" && p.y > 295 && p.y < 370) void configureStreamer();
+        else if (p.y > 440) screen = "title";
       } else if (screen === "paused") {
         if (p.y > 190 && p.y < 245) screen = "playing";
         else if (p.y > 255 && p.y < 310) resetLevel();
@@ -366,6 +428,19 @@ export default function GameCanvas() {
         if (hazard.kind === "lateSpike" && hazard.triggered && rectsOverlap(player, { ...hazard, y: hazard.y - 10 })) die(hazard);
         if (hazard.kind !== "reverse" && hazard.kind !== "blackout" && hazard.kind !== "gravityFlip" && hazard.kind !== "disappear" && hazard.kind !== "lateSpike" && rectsOverlap(player, box)) die(hazard);
       }
+      if (onlineMode && arenaConnection) {
+        for (const trap of arenaTraps) {
+          if (trap.ownerId !== arenaConnection.playerId && rectsOverlap(player, { x: trap.x - 18, y: trap.y - 18, w: 36, h: 36 })) {
+            arenaConnection.socket.emit("trap_hit", { trapId: trap.id, victimId: arenaConnection.playerId });
+            die({ penalty: 200, label: "PLAYER TRAP" });
+          }
+        }
+        networkAccumulator += dt;
+        if (networkAccumulator >= 0.05) {
+          networkAccumulator = 0;
+          arenaConnection.socket.emit("player_state", { x: player.x, y: player.y, direction: player.vx === 0 ? 0 : player.vx > 0 ? 1 : -1, jumping: !player.grounded, gbese: save.debt });
+        }
+      }
       for (const key of stage.keys) {
         if (!key.collected && rectsOverlap(player, { x: key.x - 10, y: key.y - 14, w: 20, h: 28 })) {
           key.collected = true; save.keys += 1; save.keyIds.push(key.id); persist(save); music.blip(880, 0.12);
@@ -436,6 +511,18 @@ export default function GameCanvas() {
       ctx.fillStyle = "#123d2c"; ctx.fillRect(stage.exitX, 390, 58, 80); ctx.fillStyle = "#62d477"; ctx.fillRect(stage.exitX + 7, 397, 44, 73); ctx.fillStyle = "#dff6af"; ctx.fillRect(stage.exitX + 13, 406, 32, 51); ctx.fillStyle = "#1d4d34"; ctx.fillRect(stage.exitX + 37, 431, 4, 4); drawText(ctx, "JAPA", stage.exitX + 29, 382, 11, "#8ce49a", "center", "DM Mono");
       // Player
       ctx.fillStyle = "#12161c"; ctx.fillRect(player.x - 2, player.y + 7, 20, 18); ctx.fillStyle = "#e7a56e"; ctx.fillRect(player.x + 3, player.y, 11, 9); ctx.fillStyle = "#141518"; ctx.fillRect(player.x + 2, player.y - 2, 13, 4); ctx.fillStyle = world === 1 ? "#dc5145" : world === 2 ? "#e1b44e" : "#65bb71"; ctx.fillRect(player.x + 1, player.y + 9, 14, 11); ctx.fillStyle = "#f3ddba"; ctx.fillRect(player.x + 2, player.y + 21, 5, 5); ctx.fillRect(player.x + 10, player.y + 21, 5, 5);
+      if (onlineMode) {
+        for (const remote of remotePlayers) {
+          ctx.globalAlpha = 0.58; ctx.fillStyle = "#5cc7b2"; ctx.fillRect(remote.x - 2, remote.y + 7, 20, 18); ctx.fillStyle = "#d49b76"; ctx.fillRect(remote.x + 3, remote.y, 11, 9); ctx.fillStyle = "#23786d"; ctx.fillRect(remote.x + 1, remote.y + 9, 14, 11); ctx.globalAlpha = 1;
+          drawText(ctx, remote.name, remote.x + 8, remote.y - 12, 9, "#a8f1d2", "center", "DM Mono");
+        }
+        for (const trap of arenaTraps) {
+          ctx.globalAlpha = 0.9; ctx.fillStyle = trap.ownerId === arenaConnection?.playerId ? "#f3c75a" : "#e65c4b";
+          if (trap.trapType === "shege_spike") { ctx.beginPath(); ctx.moveTo(trap.x - 18, trap.y + 18); ctx.lineTo(trap.x, trap.y - 18); ctx.lineTo(trap.x + 18, trap.y + 18); ctx.closePath(); ctx.fill(); }
+          else { ctx.fillRect(trap.x - 18, trap.y - 8, 36, 16); }
+          ctx.globalAlpha = 1;
+        }
+      }
       ctx.restore();
       // HUD
       ctx.fillStyle = "rgba(7,8,10,.88)"; ctx.fillRect(0, 0, W, 64); ctx.fillStyle = WORLD_COLORS[world]; ctx.fillRect(0, 61, W, 3);
@@ -445,9 +532,11 @@ export default function GameCanvas() {
       if (now < reverseUntil) { ctx.fillStyle = "rgba(38,165,115,.9)"; ctx.fillRect(326, 74, 308, 32); drawText(ctx, "VILLAGE PEOPLE: CONTROLS REVERSED", 480, 90, 12, "#07120e", "center", "DM Mono"); }
       if (now < blackoutUntil) { ctx.fillStyle = "rgba(0,0,0,.96)"; ctx.fillRect(0, 0, W, H); drawText(ctx, "UP NEPA", W / 2, H / 2 - 15, 30, "#d6c15e", "center", "DM Mono"); drawText(ctx, "blackout wahala...", W / 2, H / 2 + 22, 14, "#8f8f7e", "center", "DM Mono"); }
       if (screen === "playing") {
-        ctx.globalAlpha = 0.86; ctx.fillStyle = "#111418"; ctx.fillRect(22, H - 100, 175, 66); ctx.fillRect(212, H - 100, 175, 66); ctx.fillRect(744, H - 111, 185, 77); ctx.globalAlpha = 1;
+        ctx.globalAlpha = 0.86; ctx.fillStyle = "#111418"; ctx.fillRect(22, H - 100, 175, 66); ctx.fillRect(212, H - 100, 175, 66); if (onlineMode) ctx.fillRect(500, H - 111, 220, 77); ctx.fillRect(744, H - 111, 185, 77); ctx.globalAlpha = 1;
         drawText(ctx, "◀", 109, H - 67, 30, "#e8e2d6", "center", "DM Mono"); drawText(ctx, "▶", 299, H - 67, 30, "#e8e2d6", "center", "DM Mono"); drawText(ctx, "JUMP", 836, H - 72, 20, WORLD_COLORS[world], "center", "DM Mono");
+        if (onlineMode) { drawText(ctx, "DROP TRAP", 610, H - 77, 16, "#e65c4b", "center", "DM Mono"); drawText(ctx, "SAPA · SPIKE · AWOOF", 610, H - 48, 9, "#a5aaa1", "center", "DM Mono"); }
         drawText(ctx, "A / D or touch", 110, H - 18, 10, "#81877e", "center", "DM Mono"); drawText(ctx, "SPACE", 836, H - 18, 10, "#81877e", "center", "DM Mono");
+        if (onlineMode) { drawText(ctx, arenaNotice, 480, 82, 11, "#f0c86b", "center", "DM Mono"); leaderboard.slice(0, 4).forEach((entry, index) => drawText(ctx, `${index + 1}. ${entry.name}  ₦${entry.gbese}`, 780, 100 + index * 16, 10, index === 0 ? "#f0c86b" : "#a5aaa1", "left", "DM Mono")); }
       }
     };
 
@@ -461,8 +550,16 @@ export default function GameCanvas() {
       ctx.fillStyle = "#71be79"; ctx.fillRect(58, 66, 8, 172); ctx.fillStyle = "#f2d374"; ctx.fillRect(58, 246, 8, 70);
       drawText(ctx, "NNL // 001", 90, 74, 13, "#8bcf8c", "left", "DM Mono"); drawText(ctx, "NAIJA", 90, 136, 64, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "NORMAL", 90, 194, 64, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "LEVEL", 90, 252, 64, "#73c27c", "left", "Space Grotesk");
       drawText(ctx, "A pixel rage platformer about surviving the shege.", 92, 288, 14, "#c1beb1", "left", "DM Mono");
-      drawButton(ctx, "ENTER SAPA NATION", 90, 322, 300, 50, "#72c67f"); drawButton(ctx, "ADJUST YOUR WAHALA", 90, 382, 300, 44, "#c7a657", true); drawButton(ctx, "PEOPLE WEY HELP BUILD THIS SHEGE", 90, 436, 300, 44, "#73858b", true);
+      drawButton(ctx, "OFFLINE MODE  //  CLASSIC STRUGGLE", 90, 322, 340, 50, "#72c67f"); drawButton(ctx, "ADJUST YOUR WAHALA", 90, 382, 300, 44, "#c7a657", true); drawButton(ctx, "PEOPLE WEY HELP BUILD THIS SHEGE", 90, 436, 300, 44, "#73858b", true); drawButton(ctx, "ONLINE ARENA  //  50-PLAYER SABOTAGE", 560, 322, 320, 50, "#e65c4b");
       ctx.fillStyle = "rgba(7,8,10,.82)"; ctx.fillRect(690, 390, 190, 74); drawText(ctx, "CURRENT GBese", 710, 410, 11, "#8e978c", "left", "DM Mono"); drawText(ctx, `₦${save.debt.toLocaleString("en-NG")}`, 710, 440, 24, "#f3cc65", "left", "DM Mono"); drawText(ctx, "tap anywhere to wake audio", 90, 504, 11, "#7c877e", "left", "DM Mono");
+    };
+    const drawArena = () => {
+      drawOverlay(); drawText(ctx, "ONLINE ARENA", 72, 70, 36, "#e65c4b", "left", "Space Grotesk"); drawText(ctx, "50-player sabotage · real-time wahala", 74, 103, 13, "#b5a79d", "left", "DM Mono");
+      ctx.fillStyle = "rgba(20,24,26,.95)"; ctx.fillRect(72, 150, 530, 250); ctx.strokeStyle = "#e65c4b"; ctx.strokeRect(73, 151, 528, 248);
+      drawText(ctx, "QUICK-MATCH QUEUE", 100, 190, 13, "#f0c86b", "left", "DM Mono"); drawText(ctx, "Find an open arena or create one.", 100, 226, 18, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, arenaNotice, 100, 258, 12, "#a5aaa1", "left", "DM Mono");
+      drawButton(ctx, "ENTER LIVE ROOM", 100, 286, 270, 48, "#e65c4b"); drawText(ctx, "Room capacity: 50 players", 100, 368, 12, "#8d9890", "left", "DM Mono");
+      ctx.fillStyle = "rgba(20,24,26,.95)"; ctx.fillRect(632, 150, 248, 250); ctx.strokeStyle = "#f0c86b"; ctx.strokeRect(633, 151, 246, 248); drawText(ctx, "STREAMER WAHALA", 655, 190, 13, "#f0c86b", "left", "DM Mono"); drawText(ctx, streamerEnabled ? "CONNECTED" : "NOT CONNECTED", 655, 225, 21, streamerEnabled ? "#72c67f" : "#9b8278", "left", "Space Grotesk"); drawButton(ctx, "CONNECT YOUTUBE CHAT", 655, 270, 190, 46, "#72c67f", true); drawText(ctx, "!echoke  !upnepa", 655, 354, 11, "#a5aaa1", "left", "DM Mono"); drawText(ctx, "!villagepeople  !godabeg", 655, 375, 11, "#a5aaa1", "left", "DM Mono");
+      drawButton(ctx, "JAPA FROM ARENA", 72, 455, 210, 42, "#73858b", true);
     };
     const drawWorlds = () => {
       drawOverlay(); drawText(ctx, "SELECT YOUR WAHALA", 70, 68, 32, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "three zones of increasing disrespect", 72, 101, 13, "#8e978c", "left", "DM Mono");
@@ -475,7 +572,7 @@ export default function GameCanvas() {
       }
       drawText(ctx, `GBESE ₦${save.debt.toLocaleString("en-NG")}  ·  JAPA KEYS ${save.keys}/10`, 72, 431, 13, "#f3cc65", "left", "DM Mono"); drawButton(ctx, "I DON TIRE — BACK", 70, 466, 205, 42, "#73858b", true);
     };
-    const drawOptions = () => { drawOverlay(); drawText(ctx, "ADJUST YOUR WAHALA", 80, 80, 32, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "the controls are already stressful enough", 82, 113, 13, "#8e978c", "left", "DM Mono"); drawButton(ctx, "MUSIC  //  CHiPTUNE + FUJI  //  ON", 82, 168, 420, 52, "#72c67f"); drawButton(ctx, "TOUCH CONTROLS  //  LARGE + READY", 82, 236, 420, 52, "#c7a657"); drawButton(ctx, "SCREEN SHAKE  //  TASTEFUL", 82, 304, 420, 52, "#73858b"); drawText(ctx, "first tap starts the audio engine. no autoplay wahala.", 82, 402, 13, "#98a094", "left", "DM Mono"); drawButton(ctx, "BACK TO MENU", 82, 462, 188, 42, "#73858b", true); };
+    const drawOptions = () => { drawOverlay(); drawText(ctx, "ADJUST YOUR WAHALA", 80, 80, 32, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "the controls are already stressful enough", 82, 113, 13, "#8e978c", "left", "DM Mono"); drawButton(ctx, "MUSIC  //  CHiPTUNE + FUJI  //  ON", 82, 168, 420, 52, "#72c67f"); drawButton(ctx, "TOUCH CONTROLS  //  LARGE + READY", 82, 236, 420, 52, "#c7a657"); drawButton(ctx, `STREAMER MODE  //  ${streamerEnabled ? "ON" : "OFF"}`, 82, 304, 420, 52, streamerEnabled ? "#72c67f" : "#73858b"); drawText(ctx, "tap streamer mode to connect a YouTube video ID or @handle while in an arena", 82, 402, 13, "#98a094", "left", "DM Mono"); drawButton(ctx, "BACK TO MENU", 82, 462, 188, 42, "#73858b", true); };
     const drawCredits = () => { drawOverlay(); drawText(ctx, "PEOPLE WEY HELP BUILD THIS SHEGE", 74, 78, 28, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "A tiny arcade built with big wahala.", 76, 112, 13, "#8e978c", "left", "DM Mono"); drawText(ctx, "DESIGN", 80, 184, 11, "#72c67f", "left", "DM Mono"); drawText(ctx, "you + the village people", 80, 211, 18, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "ENGINE", 80, 266, 11, "#c7a657", "left", "DM Mono"); drawText(ctx, "canvas, stubbornness, and Web Audio", 80, 293, 18, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "MUSIC", 80, 348, 11, "#73858b", "left", "DM Mono"); drawText(ctx, "frantic talking drum department", 80, 375, 18, "#f7f1e6", "left", "Space Grotesk"); drawButton(ctx, "BACK TO MENU", 80, 454, 188, 42, "#73858b", true); };
     const drawPause = () => { drawOverlay(); drawText(ctx, "HOLD ON SMALL", W / 2, 120, 34, "#f7f1e6", "center", "Space Grotesk"); drawText(ctx, "the shege is still here when you return", W / 2, 155, 13, "#9aa297", "center", "DM Mono"); drawButton(ctx, "WE MOVE", 335, 195, 290, 48, WORLD_COLORS[world]); drawButton(ctx, "TRY THIS SHEGE AGAIN", 335, 260, 290, 48, "#c7a657"); drawButton(ctx, "JAPA FROM THE GAME", 335, 325, 290, 48, "#73858b"); };
     const drawDead = () => { drawWorld(performance.now()); ctx.fillStyle = "rgba(71,20,26,.72)"; ctx.fillRect(0, 0, W, H); drawText(ctx, deathMessage, W / 2, 208, 26, "#fff0dc", "center", "Space Grotesk"); drawText(ctx, `GBESE +₦${deathPenalty}`, W / 2, 250, 18, "#ffbc6b", "center", "DM Mono"); drawText(ctx, "respawning in a blink...", W / 2, 300, 12, "#efb7a4", "center", "DM Mono"); };
@@ -483,12 +580,12 @@ export default function GameCanvas() {
 
     const draw = (now: number) => {
       ctx.save(); ctx.setTransform(canvas.width / W, 0, 0, canvas.height / H, 0, 0); ctx.clearRect(0, 0, W, H);
-      if (screen === "title") drawTitle(); else if (screen === "worlds") drawWorlds(); else if (screen === "options") drawOptions(); else if (screen === "credits") drawCredits(); else if (screen === "playing") drawWorld(now); else if (screen === "paused") { drawWorld(now); drawPause(); } else if (screen === "dead") drawDead(); else if (screen === "clear") drawClear();
+      if (screen === "title") drawTitle(); else if (screen === "worlds") drawWorlds(); else if (screen === "arena") drawArena(); else if (screen === "options") drawOptions(); else if (screen === "credits") drawCredits(); else if (screen === "playing") drawWorld(now); else if (screen === "paused") { drawWorld(now); drawPause(); } else if (screen === "dead") drawDead(); else if (screen === "clear") drawClear();
       ctx.restore();
     };
     const loop = (now: number) => { const dt = Math.min(0.034, (now - last) / 1000); last = now; elapsed += dt; update(dt, now); draw(now); raf = requestAnimationFrame(loop); };
     raf = requestAnimationFrame(loop);
-    return () => { cancelAnimationFrame(raf); window.removeEventListener("resize", resize); canvas.removeEventListener("pointerdown", handlePointerDown); canvas.removeEventListener("pointerup", handlePointerUp); canvas.removeEventListener("pointercancel", handlePointerUp); window.removeEventListener("keydown", keydown); window.removeEventListener("keyup", keyup); music.stop(); };
+    return () => { cancelAnimationFrame(raf); arenaConnection?.leave(); window.removeEventListener("resize", resize); canvas.removeEventListener("pointerdown", handlePointerDown); canvas.removeEventListener("pointerup", handlePointerUp); canvas.removeEventListener("pointercancel", handlePointerUp); window.removeEventListener("keydown", keydown); window.removeEventListener("keyup", keyup); music.stop(); };
   }, []);
 
   return <canvas ref={canvasRef} aria-label="Naija Normal Level game canvas" />;

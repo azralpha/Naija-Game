@@ -17,3 +17,7 @@ A complete, mobile-browser-friendly 2D rage platformer with high-contrast pixel 
 - Reaching the exit clears the level and applies the ₦2,000 payout.
 - `?demo` starts the first stage with a deterministic auto-run showcase.
 - `pnpm check` passes with no TypeScript errors.
+
+## Hybrid arena slice completed
+
+The first multiplayer slice adds Socket.IO room management with a 50-player cap, 20 Hz player snapshots, live Gbese leaderboard broadcasts, three server-validated trap tokens, remote-player rendering, and touch-ready trap placement. The client also supports `!echoke`, `!upnepa`, `!villagepeople`, and `!godabeg` event handling. YouTube Live Chat support is implemented through the official API flow, with the server-side `YOUTUBE_API_KEY` still required before a creator can connect a live broadcast.
