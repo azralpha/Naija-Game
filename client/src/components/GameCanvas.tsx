@@ -47,6 +47,9 @@ type Player = { x: number; y: number; w: number; h: number; vx: number; vy: numb
 const W = 960;
 const H = 540;
 const STORAGE_KEY = "nnl-save-v1";
+const SETTINGS_KEY = "nnl-settings-v1";
+const MUSIC_TRACKS = ["OFF", "TRACK 1: Chiptune + Fuji", "TRACK 2: Afro-Beats Rush", "TRACK 3: Street-Pop Chaos"] as const;
+const CONTROL_SCALES = [0.8, 1, 1.2] as const;
 const ART_REF = "/manus-storage/nnl-visual-target_084dbdec.png";
 const DEATH_MESSAGES = [
   "Sapa don catch you!", "You don see Shege!", "Wahala no dey finish o", "God abeg… try again",
@@ -79,6 +82,22 @@ function loadSave(): SaveData {
 
 function persist(save: SaveData) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(save));
+}
+
+function loadSettings() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "null") as { musicTrack?: number; controlScale?: number } | null;
+    return {
+      musicTrack: Math.max(0, Math.min(MUSIC_TRACKS.length - 1, Math.round(Number(stored?.musicTrack) || 1))),
+      controlScale: CONTROL_SCALES.includes(Number(stored?.controlScale) as typeof CONTROL_SCALES[number]) ? Number(stored?.controlScale) as typeof CONTROL_SCALES[number] : 1,
+    };
+  } catch {
+    return { musicTrack: 1, controlScale: 1 as typeof CONTROL_SCALES[number] };
+  }
+}
+
+function persistSettings(settings: { musicTrack: number; controlScale: number }) {
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
 }
 
 function rectsOverlap(a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }) {
@@ -137,12 +156,21 @@ class MusicBox {
   timer: number | null = null;
   step = 0;
   next = 0;
+  track = 1;
+
+  setTrack(track: number) {
+    this.track = ((track % MUSIC_TRACKS.length) + MUSIC_TRACKS.length) % MUSIC_TRACKS.length;
+    if (!this.master || !this.ctx) return;
+    this.master.gain.setTargetAtTime(this.track === 0 ? 0 : 0.13, this.ctx.currentTime, 0.025);
+    this.step = 0;
+    this.next = this.ctx.currentTime;
+  }
 
   start() {
     if (this.ctx) { void this.ctx.resume(); return; }
     this.ctx = new AudioContext();
     this.master = this.ctx.createGain();
-    this.master.gain.value = 0.13;
+    this.master.gain.value = this.track === 0 ? 0 : 0.13;
     this.master.connect(this.ctx.destination);
     this.next = this.ctx.currentTime;
     const tick = () => {
@@ -178,11 +206,17 @@ class MusicBox {
   }
 
   schedule(time: number, step: number) {
-    const bass = [110, 110, 147, 123, 98, 98, 165, 123][step % 8];
-    const lead = [0, 0, 392, 440, 0, 330, 294, 0][step % 8];
-    if (step % 2 === 0) this.tone(time, bass, 0.18, "square", 0.25);
+    if (this.track === 0) return;
+    const patterns = [
+      { bass: [110, 110, 147, 123, 98, 98, 165, 123], lead: [0, 0, 392, 440, 0, 330, 294, 0], type: "square" as OscillatorType, tempo: 156 },
+      { bass: [98, 123, 147, 165, 98, 123, 196, 165], lead: [392, 0, 494, 0, 440, 0, 587, 0], type: "sawtooth" as OscillatorType, tempo: 164 },
+      { bass: [82, 98, 123, 147, 82, 110, 123, 165], lead: [330, 392, 0, 440, 330, 494, 0, 392], type: "square" as OscillatorType, tempo: 172 },
+    ][this.track - 1];
+    const bass = patterns.bass[step % 8];
+    const lead = patterns.lead[step % 8];
+    if (step % 2 === 0) this.tone(time, bass, 0.18, patterns.type, 0.25);
     if (lead) this.tone(time, lead, 0.11, "triangle", 0.12);
-    if (step % 4 === 2) this.noise(time, 0.08, 0.13);
+    if (step % 4 === 2 || this.track > 1 && step % 2 === 1) this.noise(time, 0.08, this.track === 3 ? 0.16 : 0.13);
     if (step % 8 === 7) this.noise(time, 0.05, 0.08);
   }
 
@@ -199,7 +233,18 @@ function drawButton(ctx: CanvasRenderingContext2D, label: string, x: number, y: 
   ctx.fillStyle = "rgba(9,10,12,.9)"; ctx.fillRect(x, y, w, h);
   ctx.strokeStyle = accent; ctx.lineWidth = 2; ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
   ctx.fillStyle = accent; ctx.fillRect(x, y, 5, h);
-  drawText(ctx, label, x + 18, y + h / 2, small ? 13 : 16, "#f7f1e6", "left", "DM Mono");
+  ctx.save(); ctx.beginPath(); ctx.rect(x + 10, y + 2, w - 20, h - 4); ctx.clip();
+  const maxChars = Math.max(12, Math.floor((w - 38) / (small ? 7.2 : 8.2)));
+  const fontSize = Math.min(small ? 13 : 16, Math.max(10, Math.floor((w - 38) / Math.max(1, label.length) * 1.72)));
+  if (label.length <= maxChars) drawText(ctx, label, x + 18, y + h / 2, fontSize, "#f7f1e6", "left", "DM Mono");
+  else {
+    const split = label.lastIndexOf(" ", maxChars);
+    const first = split > 4 ? label.slice(0, split) : label.slice(0, maxChars);
+    const second = label.slice(first.length).trim();
+    drawText(ctx, first, x + 18, y + h / 2 - 8, Math.max(9, fontSize - 1), "#f7f1e6", "left", "DM Mono");
+    drawText(ctx, second, x + 18, y + h / 2 + 8, Math.max(9, fontSize - 1), "#f7f1e6", "left", "DM Mono");
+  }
+  ctx.restore();
 }
 
 export default function GameCanvas() {
@@ -247,6 +292,10 @@ export default function GameCanvas() {
     const touch = { left: false, right: false, jump: false };
     const pressed = { jump: false };
     const music = new MusicBox();
+    const settings = loadSettings();
+    let musicTrack = settings.musicTrack;
+    let controlScale = settings.controlScale;
+    music.track = musicTrack;
     const art = new Image(); art.src = ART_REF;
     const dpr = Math.min(2, window.devicePixelRatio || 1);
 
@@ -260,6 +309,17 @@ export default function GameCanvas() {
     const canvasPoint = (event: PointerEvent) => {
       const rect = canvas.getBoundingClientRect();
       return { x: ((event.clientX - rect.left) / rect.width) * W, y: ((event.clientY - rect.top) / rect.height) * H };
+    };
+    const cycleMusic = () => {
+      musicTrack = (musicTrack + 1) % MUSIC_TRACKS.length;
+      music.setTrack(musicTrack);
+      persistSettings({ musicTrack, controlScale });
+      music.start();
+    };
+    const cycleControls = () => {
+      const currentIndex = CONTROL_SCALES.indexOf(controlScale as typeof CONTROL_SCALES[number]);
+      controlScale = CONTROL_SCALES[(currentIndex + 1) % CONTROL_SCALES.length];
+      persistSettings({ musicTrack, controlScale });
     };
     const onStreamerEvent = (event: StreamerEvent) => {
       if (event.command === "upnepa") blackoutUntil = performance.now() + 2000;
@@ -329,7 +389,9 @@ export default function GameCanvas() {
       const p = canvasPoint(event);
       if (screen === "playing") {
         if (p.y > H - 135) {
-          if (p.x < 210) touch.left = true; else if (p.x < 425) touch.right = true; else if (onlineMode && p.x > 500 && p.x < 720) placeTrap(); else if (p.x > 745) { touch.jump = true; pressed.jump = true; }
+          const leftWidth = 175 * controlScale; const rightStart = 212 - (controlScale - 1) * 50; const rightEnd = rightStart + 175 * controlScale;
+          const trapStart = 500 - (controlScale - 1) * 45; const trapEnd = 720 + (controlScale - 1) * 45; const jumpStart = 744 - (controlScale - 1) * 40;
+          if (p.x < 22 + leftWidth) touch.left = true; else if (p.x > rightStart && p.x < rightEnd) touch.right = true; else if (onlineMode && p.x > trapStart && p.x < trapEnd) placeTrap(); else if (p.x > jumpStart) { touch.jump = true; pressed.jump = true; }
         } else if (p.x > W - 88 && p.y < 80) screen = "paused";
         else if (p.x > W - 160 && p.y > H - 95) screen = "paused";
         return;
@@ -349,7 +411,9 @@ export default function GameCanvas() {
           if (pick >= 0 && pick <= 2 && pick <= save.unlocked) startGame(pick);
         } else if (p.y > 450) screen = "title";
       } else if (screen === "options" || screen === "credits") {
-        if (screen === "options" && p.y > 295 && p.y < 370) void configureStreamer();
+        if (screen === "options" && p.y > 155 && p.y < 225) cycleMusic();
+        else if (screen === "options" && p.y > 225 && p.y < 295) cycleControls();
+        else if (screen === "options" && p.y > 295 && p.y < 370) void configureStreamer();
         else if (p.y > 440) screen = "title";
       } else if (screen === "paused") {
         if (p.y > 190 && p.y < 245) screen = "playing";
@@ -532,9 +596,10 @@ export default function GameCanvas() {
       if (now < reverseUntil) { ctx.fillStyle = "rgba(38,165,115,.9)"; ctx.fillRect(326, 74, 308, 32); drawText(ctx, "VILLAGE PEOPLE: CONTROLS REVERSED", 480, 90, 12, "#07120e", "center", "DM Mono"); }
       if (now < blackoutUntil) { ctx.fillStyle = "rgba(0,0,0,.96)"; ctx.fillRect(0, 0, W, H); drawText(ctx, "UP NEPA", W / 2, H / 2 - 15, 30, "#d6c15e", "center", "DM Mono"); drawText(ctx, "blackout wahala...", W / 2, H / 2 + 22, 14, "#8f8f7e", "center", "DM Mono"); }
       if (screen === "playing") {
-        ctx.globalAlpha = 0.86; ctx.fillStyle = "#111418"; ctx.fillRect(22, H - 100, 175, 66); ctx.fillRect(212, H - 100, 175, 66); if (onlineMode) ctx.fillRect(500, H - 111, 220, 77); ctx.fillRect(744, H - 111, 185, 77); ctx.globalAlpha = 1;
-        drawText(ctx, "◀", 109, H - 67, 30, "#e8e2d6", "center", "DM Mono"); drawText(ctx, "▶", 299, H - 67, 30, "#e8e2d6", "center", "DM Mono"); drawText(ctx, "JUMP", 836, H - 72, 20, WORLD_COLORS[world], "center", "DM Mono");
-        if (onlineMode) { drawText(ctx, "DROP TRAP", 610, H - 77, 16, "#e65c4b", "center", "DM Mono"); drawText(ctx, "SAPA · SPIKE · AWOOF", 610, H - 48, 9, "#a5aaa1", "center", "DM Mono"); }
+        const controlY = H - 100; const leftWidth = 175 * controlScale; const rightStart = 212 - (controlScale - 1) * 50; const rightWidth = 175 * controlScale; const jumpStart = 744 - (controlScale - 1) * 40; const jumpWidth = 185 * controlScale;
+        ctx.globalAlpha = 0.86; ctx.fillStyle = "#111418"; ctx.fillRect(22, controlY, leftWidth, 66 * controlScale); ctx.fillRect(rightStart, controlY, rightWidth, 66 * controlScale); if (onlineMode) ctx.fillRect(500 - (controlScale - 1) * 45, H - 111, 220 * controlScale, 77 * controlScale); ctx.fillRect(jumpStart, H - 111, jumpWidth, 77 * controlScale); ctx.globalAlpha = 1;
+        drawText(ctx, "◀", 22 + leftWidth / 2, controlY + 33 * controlScale, 30 * controlScale, "#e8e2d6", "center", "DM Mono"); drawText(ctx, "▶", rightStart + rightWidth / 2, controlY + 33 * controlScale, 30 * controlScale, "#e8e2d6", "center", "DM Mono"); drawText(ctx, "JUMP", jumpStart + jumpWidth / 2, H - 72, 20 * controlScale, WORLD_COLORS[world], "center", "DM Mono");
+        if (onlineMode) { const trapStart = 500 - (controlScale - 1) * 45; drawText(ctx, "DROP TRAP", trapStart + 110 * controlScale, H - 77, 16 * controlScale, "#e65c4b", "center", "DM Mono"); drawText(ctx, "SAPA · SPIKE · AWOOF", trapStart + 110 * controlScale, H - 48, 9 * controlScale, "#a5aaa1", "center", "DM Mono"); }
         drawText(ctx, "A / D or touch", 110, H - 18, 10, "#81877e", "center", "DM Mono"); drawText(ctx, "SPACE", 836, H - 18, 10, "#81877e", "center", "DM Mono");
         if (onlineMode) { drawText(ctx, arenaNotice, 480, 82, 11, "#f0c86b", "center", "DM Mono"); leaderboard.slice(0, 4).forEach((entry, index) => drawText(ctx, `${index + 1}. ${entry.name}  ₦${entry.gbese}`, 780, 100 + index * 16, 10, index === 0 ? "#f0c86b" : "#a5aaa1", "left", "DM Mono")); }
       }
@@ -549,7 +614,7 @@ export default function GameCanvas() {
       ctx.fillStyle = "rgba(9,10,12,.72)"; ctx.fillRect(0, 0, W, H);
       ctx.fillStyle = "#71be79"; ctx.fillRect(58, 66, 8, 172); ctx.fillStyle = "#f2d374"; ctx.fillRect(58, 246, 8, 70);
       drawText(ctx, "NNL // 001", 90, 74, 13, "#8bcf8c", "left", "DM Mono"); drawText(ctx, "NAIJA", 90, 136, 64, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "NORMAL", 90, 194, 64, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "LEVEL", 90, 252, 64, "#73c27c", "left", "Space Grotesk");
-      drawText(ctx, "A pixel rage platformer about surviving the shege.", 92, 288, 14, "#c1beb1", "left", "DM Mono");
+      drawText(ctx, "A pixel rage platformer about surviving the shege.", 92, 288, 14, "#c1beb1", "left", "DM Mono"); drawText(ctx, "Fuck around and Sabi am", 92, 307, 13, "#f2d374", "left", "DM Mono");
       drawButton(ctx, "OFFLINE MODE  //  CLASSIC STRUGGLE", 90, 322, 340, 50, "#72c67f"); drawButton(ctx, "ADJUST YOUR WAHALA", 90, 382, 300, 44, "#c7a657", true); drawButton(ctx, "PEOPLE WEY HELP BUILD THIS SHEGE", 90, 436, 300, 44, "#73858b", true); drawButton(ctx, "ONLINE ARENA  //  50-PLAYER SABOTAGE", 560, 322, 320, 50, "#e65c4b");
       ctx.fillStyle = "rgba(7,8,10,.82)"; ctx.fillRect(690, 390, 190, 74); drawText(ctx, "CURRENT GBese", 710, 410, 11, "#8e978c", "left", "DM Mono"); drawText(ctx, `₦${save.debt.toLocaleString("en-NG")}`, 710, 440, 24, "#f3cc65", "left", "DM Mono"); drawText(ctx, "tap anywhere to wake audio", 90, 504, 11, "#7c877e", "left", "DM Mono");
     };
@@ -572,8 +637,8 @@ export default function GameCanvas() {
       }
       drawText(ctx, `GBESE ₦${save.debt.toLocaleString("en-NG")}  ·  JAPA KEYS ${save.keys}/10`, 72, 431, 13, "#f3cc65", "left", "DM Mono"); drawButton(ctx, "I DON TIRE — BACK", 70, 466, 205, 42, "#73858b", true);
     };
-    const drawOptions = () => { drawOverlay(); drawText(ctx, "ADJUST YOUR WAHALA", 80, 80, 32, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "the controls are already stressful enough", 82, 113, 13, "#8e978c", "left", "DM Mono"); drawButton(ctx, "MUSIC  //  CHiPTUNE + FUJI  //  ON", 82, 168, 420, 52, "#72c67f"); drawButton(ctx, "TOUCH CONTROLS  //  LARGE + READY", 82, 236, 420, 52, "#c7a657"); drawButton(ctx, `STREAMER MODE  //  ${streamerEnabled ? "ON" : "OFF"}`, 82, 304, 420, 52, streamerEnabled ? "#72c67f" : "#73858b"); drawText(ctx, "tap streamer mode to connect a YouTube video ID or @handle while in an arena", 82, 402, 13, "#98a094", "left", "DM Mono"); drawButton(ctx, "BACK TO MENU", 82, 462, 188, 42, "#73858b", true); };
-    const drawCredits = () => { drawOverlay(); drawText(ctx, "PEOPLE WEY HELP BUILD THIS SHEGE", 74, 78, 28, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "A tiny arcade built with big wahala.", 76, 112, 13, "#8e978c", "left", "DM Mono"); drawText(ctx, "DESIGN", 80, 184, 11, "#72c67f", "left", "DM Mono"); drawText(ctx, "you + the village people", 80, 211, 18, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "ENGINE", 80, 266, 11, "#c7a657", "left", "DM Mono"); drawText(ctx, "canvas, stubbornness, and Web Audio", 80, 293, 18, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "MUSIC", 80, 348, 11, "#73858b", "left", "DM Mono"); drawText(ctx, "frantic talking drum department", 80, 375, 18, "#f7f1e6", "left", "Space Grotesk"); drawButton(ctx, "BACK TO MENU", 80, 454, 188, 42, "#73858b", true); };
+    const drawOptions = () => { drawOverlay(); drawText(ctx, "ADJUST YOUR WAHALA", 80, 80, 32, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "the controls are already stressful enough", 82, 113, 13, "#8e978c", "left", "DM Mono"); drawButton(ctx, `MUSIC  //  ${MUSIC_TRACKS[musicTrack]}`, 82, 168, 420, 52, musicTrack === 0 ? "#73858b" : "#72c67f"); drawButton(ctx, `TOUCH CONTROLS  //  ${controlScale.toFixed(1)}x ${controlScale === 0.8 ? "SMALL" : controlScale === 1 ? "MEDIUM" : "LARGE"}`, 82, 236, 420, 52, "#c7a657"); drawButton(ctx, `STREAMER MODE  //  ${streamerEnabled ? "ON" : "OFF"}`, 82, 304, 420, 52, streamerEnabled ? "#72c67f" : "#73858b"); drawText(ctx, "tap a button to cycle. settings persist on this device.", 82, 402, 13, "#98a094", "left", "DM Mono"); drawButton(ctx, "BACK TO MENU", 82, 462, 188, 42, "#73858b", true); };
+    const drawCredits = () => { drawOverlay(); drawText(ctx, "PEOPLE WEY HELP BUILD THIS SHEGE", 74, 58, 26, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "A tiny arcade built with big wahala.", 76, 88, 12, "#8e978c", "left", "DM Mono"); drawText(ctx, "DESIGN", 80, 132, 11, "#72c67f", "left", "DM Mono"); drawText(ctx, "You + The Village People", 80, 153, 16, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "ENGINE", 80, 190, 11, "#c7a657", "left", "DM Mono"); drawText(ctx, "Canvas API · Vite · React · TypeScript", 80, 211, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Web Audio API · Express + Socket.io", 80, 231, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "MUSIC", 80, 270, 11, "#73858b", "left", "DM Mono"); drawText(ctx, "Chiptune + Fuji · Afro-Beats Rush", 80, 291, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Street-Pop Chaos", 80, 311, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Frantic Talking Drum Dept.", 80, 331, 12, "#a5aaa1", "left", "DM Mono"); drawText(ctx, "DEVELOPER", 80, 370, 11, "#e65c4b", "left", "DM Mono"); drawText(ctx, "Azamen (Alpha Collective Corporation)", 80, 394, 17, "#f7f1e6", "left", "Space Grotesk"); drawButton(ctx, "BACK TO MENU", 80, 454, 188, 42, "#73858b", true); };
     const drawPause = () => { drawOverlay(); drawText(ctx, "HOLD ON SMALL", W / 2, 120, 34, "#f7f1e6", "center", "Space Grotesk"); drawText(ctx, "the shege is still here when you return", W / 2, 155, 13, "#9aa297", "center", "DM Mono"); drawButton(ctx, "WE MOVE", 335, 195, 290, 48, WORLD_COLORS[world]); drawButton(ctx, "TRY THIS SHEGE AGAIN", 335, 260, 290, 48, "#c7a657"); drawButton(ctx, "JAPA FROM THE GAME", 335, 325, 290, 48, "#73858b"); };
     const drawDead = () => { drawWorld(performance.now()); ctx.fillStyle = "rgba(71,20,26,.72)"; ctx.fillRect(0, 0, W, H); drawText(ctx, deathMessage, W / 2, 208, 26, "#fff0dc", "center", "Space Grotesk"); drawText(ctx, `GBESE +₦${deathPenalty}`, W / 2, 250, 18, "#ffbc6b", "center", "DM Mono"); drawText(ctx, "respawning in a blink...", W / 2, 300, 12, "#efb7a4", "center", "DM Mono"); };
     const drawClear = () => { drawOverlay(); drawText(ctx, "LEVEL CLEAR", W / 2, 115, 38, "#72c67f", "center", "Space Grotesk"); drawText(ctx, clearMessage, W / 2, 168, 17, "#f7f1e6", "center", "Space Grotesk"); drawText(ctx, "PAYOUT  +₦2,000", W / 2, 238, 21, "#f3cc65", "center", "DM Mono"); drawText(ctx, `GBESE NOW  ₦${save.debt.toLocaleString("en-NG")}`, W / 2, 274, 14, "#a3aea1", "center", "DM Mono"); drawButton(ctx, "NEXT DOOR", 355, 355, 250, 50, WORLD_COLORS[world]); };
