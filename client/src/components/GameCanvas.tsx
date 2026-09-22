@@ -1,8 +1,9 @@
 import { useEffect, useRef } from "react";
 import { connectArena, type ArenaConnection, type ArenaLeaderboardEntry, type ArenaTrap, type RemotePlayer, type StreamerEvent } from "../game/online";
 import { getLevel, type WorldIndex } from "../game/levelData";
+import { DEFAULT_WARDROBE, GROUP_A_BOTTOMS, GROUP_A_TOPS, GROUP_B_BOTTOMS, GROUP_B_TOPS, equipItem, isUnlocked, itemById, type WardrobeItem } from "../game/wardrobe";
 
-type Screen = "title" | "worlds" | "levels" | "arena" | "options" | "credits" | "playing" | "paused" | "dead" | "clear";
+type Screen = "title" | "worlds" | "levels" | "wardrobe" | "arena" | "options" | "credits" | "playing" | "paused" | "dead" | "clear";
 type Platform = { x: number; y: number; w: number; h: number; vanish?: boolean; color?: string };
 type HazardKind =
   | "spike"
@@ -33,7 +34,7 @@ type Hazard = {
   triggered?: boolean;
 };
 type KeyPickup = { id: string; x: number; y: number; collected: boolean };
-type SaveData = { debt: number; keys: number; unlocked: number; keyIds: string[]; adminMode: boolean; progress: number[] };
+type SaveData = { debt: number; keys: number; unlocked: number; keyIds: string[]; adminMode: boolean; progress: number[]; wardrobe: typeof DEFAULT_WARDROBE };
 type Stage = {
   world: WorldIndex;
   width: number;
@@ -77,9 +78,10 @@ function loadSave(): SaveData {
       keyIds: Array.isArray(stored?.keyIds) ? stored!.keyIds! : [],
       adminMode: stored?.adminMode === true,
       progress: Array.isArray(stored?.progress) ? stored!.progress!.map((value) => Math.max(0, Math.min(10, Number(value) || 0))).slice(0, 4).concat([0, 0, 0, 0]).slice(0, 4) : [1, 0, 0, 0],
+      wardrobe: { ...DEFAULT_WARDROBE, ...(stored?.wardrobe || {}), unlockedB: Array.isArray(stored?.wardrobe?.unlockedB) ? stored.wardrobe!.unlockedB : [] },
     };
   } catch {
-    return { debt: 0, keys: 0, unlocked: 0, keyIds: [], adminMode: false, progress: [1, 0, 0, 0] };
+    return { debt: 0, keys: 0, unlocked: 0, keyIds: [], adminMode: false, progress: [1, 0, 0, 0], wardrobe: { ...DEFAULT_WARDROBE, unlockedB: [] } };
   }
 }
 
@@ -226,6 +228,27 @@ function drawButton(ctx: CanvasRenderingContext2D, label: string, x: number, y: 
   ctx.restore();
 }
 
+function drawAvatar(ctx: CanvasRenderingContext2D, x: number, y: number, scale: number, wardrobe: typeof DEFAULT_WARDROBE, name?: string) {
+  const top = itemById(wardrobe.topId) || GROUP_A_TOPS[3];
+  const bottom = itemById(wardrobe.bottomId) || GROUP_A_BOTTOMS[2];
+  ctx.save();
+  // White/grayscale base silhouette first; wardrobe colors are tint layers over the same base sprite.
+  ctx.fillStyle = "#12161c"; ctx.fillRect(x - 2 * scale, y + 7 * scale, 20 * scale, 18 * scale);
+  ctx.fillStyle = "#e7a56e"; ctx.fillRect(x + 3 * scale, y, 11 * scale, 9 * scale);
+  ctx.fillStyle = "#141518"; ctx.fillRect(x + 2 * scale, y - 2 * scale, 13 * scale, 4 * scale);
+  ctx.fillStyle = top.color; ctx.fillRect(x + 1 * scale, y + 9 * scale, 14 * scale, 11 * scale);
+  ctx.fillStyle = bottom.color; ctx.fillRect(x + 1 * scale, y + 19 * scale, 14 * scale, 7 * scale);
+  ctx.fillStyle = "#f3ddba"; ctx.fillRect(x + 2 * scale, y + 21 * scale, 5 * scale, 5 * scale); ctx.fillRect(x + 10 * scale, y + 21 * scale, 5 * scale, 5 * scale);
+  if (top.group === "B" || bottom.group === "B") { ctx.globalAlpha = 0.34; ctx.fillStyle = "#ffffff"; ctx.fillRect(x + 2 * scale, y + 10 * scale, 11 * scale, 2 * scale); ctx.globalAlpha = 1; }
+  if (name) {
+    const label = `${wardrobe.titleBadge ? `[${wardrobe.titleBadge}] ` : ""}${name}`;
+    ctx.font = `${Math.max(9, Math.round(10 * scale))}px DM Mono`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    if (wardrobe.nameGlow) { ctx.shadowColor = "#f6d365"; ctx.shadowBlur = 9; }
+    ctx.fillStyle = wardrobe.nameGlow ? "#ffe7a0" : "#f7f1e6"; ctx.fillText(label.slice(0, 24), x + 7 * scale, y - 14 * scale);
+  }
+  ctx.restore();
+}
+
 export default function GameCanvas() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -236,7 +259,8 @@ export default function GameCanvas() {
     if (!ctx) return;
     canvas.width = W; canvas.height = H; ctx.imageSmoothingEnabled = false;
 
-    let screen: Screen = new URLSearchParams(window.location.search).has("demo") ? "playing" : "title";
+    const query = new URLSearchParams(window.location.search);
+    let screen: Screen = query.has("demo") ? "playing" : query.has("wardrobe") ? "wardrobe" : "title";
     let onlineMode = false;
     let arenaConnection: ArenaConnection | null = null;
     let remotePlayers: RemotePlayer[] = [];
@@ -251,7 +275,14 @@ export default function GameCanvas() {
     let adminMode = save.adminMode;
     let adminToast = "";
     let adminToastUntil = 0;
+    let wardrobeTab: "A" | "B" = query.has("metals") ? "B" : "A";
+    let demo = query.has("demo");
     const titleTapTimes: number[] = [];
+    if (!demo && !query.has("wardrobe") && (!localStorage.getItem(STORAGE_KEY) || !localStorage.getItem(STORAGE_KEY)?.includes('"wardrobe"'))) {
+      const entered = window.prompt("Welcome to Naija Normal Level. What should we call you?", DEFAULT_WARDROBE.username);
+      const username = (entered || DEFAULT_WARDROBE.username).trim().slice(0, 18) || DEFAULT_WARDROBE.username;
+      save.wardrobe.username = username; persist(save);
+    }
     let stage = stageFor(world, currentLevel, save);
     let player = createPlayer(stage);
     let cameraX = 0;
@@ -269,7 +300,6 @@ export default function GameCanvas() {
     let gravityFlipUntil = 0;
     let shake = 0;
     let standStill = 0;
-    let demo = new URLSearchParams(window.location.search).has("demo");
     let demoTime = 0;
     let networkAccumulator = 0;
     const keysDown = new Set<string>();
@@ -305,10 +335,37 @@ export default function GameCanvas() {
       controlScale = CONTROL_SCALES[(currentIndex + 1) % CONTROL_SCALES.length];
       persistSettings({ musicTrack, controlScale });
     };
+    const editUsername = () => {
+      const entered = window.prompt("Gamer Username", save.wardrobe.username);
+      if (entered === null) return;
+      save.wardrobe.username = entered.trim().slice(0, 18) || DEFAULT_WARDROBE.username;
+      persist(save);
+    };
+    const wardrobeItems = () => wardrobeTab === "A" ? { tops: GROUP_A_TOPS, bottoms: GROUP_A_BOTTOMS } : { tops: GROUP_B_TOPS, bottoms: GROUP_B_BOTTOMS };
+    const chooseWardrobeItem = (item: WardrobeItem) => {
+      if (!isUnlocked(item, save.wardrobe)) {
+        if (save.debt < item.price) { adminToast = `Need ₦${item.price.toLocaleString("en-NG")} GB to unlock this piece.`; adminToastUntil = performance.now() + 2200; return; }
+        save.debt -= item.price; save.wardrobe.unlockedB = Array.from(new Set(save.wardrobe.unlockedB.concat(item.id)));
+      }
+      save.wardrobe = equipItem(item, save.wardrobe); persist(save); music.blip(880, 0.1);
+    };
+    const buyBundle = () => {
+      if (save.wardrobe.bundleUnlocked) { save.wardrobe.nameGlow = !save.wardrobe.nameGlow; persist(save); return; }
+      if (save.debt < 2000 && !adminMode) { adminToast = "Oga Boss Bundle needs ₦2,000 GB. Payment adapter ready for checkout."; adminToastUntil = performance.now() + 2600; return; }
+      save.debt = adminMode ? save.debt : save.debt - 2000;
+      save.wardrobe.bundleUnlocked = true; save.wardrobe.nameGlow = true; save.wardrobe.titleBadgeUnlocked = true; save.wardrobe.unlockedB = [...GROUP_B_TOPS, ...GROUP_B_BOTTOMS].map((item) => item.id); persist(save); music.blip(1320, 0.2);
+    };
+    const cycleBadge = () => {
+      if (!save.wardrobe.titleBadgeUnlocked && !save.wardrobe.bundleUnlocked && !adminMode) {
+        if (save.debt < 200) { adminToast = "Custom title badge needs ₦200 GB. Checkout adapter ready."; adminToastUntil = performance.now() + 2400; return; }
+        save.debt -= 200; save.wardrobe.titleBadgeUnlocked = true; persist(save);
+      }
+      const badges = ["", "OGA BOSS", "VIP", "SHEGE LORD"]; const next = (badges.indexOf(save.wardrobe.titleBadge) + 1) % badges.length; save.wardrobe.titleBadge = badges[next]; persist(save);
+    };
     const enableAdminMode = () => {
       if (adminMode) return;
       adminMode = true;
-      save = { ...save, adminMode: true, unlocked: 3, keys: 10, debt: 999999, progress: [10, 10, 10, 10] };
+      save = { ...save, adminMode: true, unlocked: 3, keys: 10, debt: 999999, progress: [10, 10, 10, 10], wardrobe: { ...save.wardrobe, bundleUnlocked: true, nameGlow: true, titleBadgeUnlocked: true, unlockedB: [...GROUP_B_TOPS, ...GROUP_B_BOTTOMS].map((item) => item.id) } };
       persist(save);
       music.start();
       if (music.ctx) {
@@ -392,7 +449,7 @@ export default function GameCanvas() {
     const die = (hazard: Hazard | { penalty: number; label: string }) => {
       if (screen !== "playing") return;
       deathPenalty = hazard.penalty; save.debt += hazard.penalty; persist(save);
-      deathMessage = DEATH_MESSAGES[Math.floor(Math.random() * DEATH_MESSAGES.length)]; deathUntil = performance.now() + 900;
+      deathMessage = `${save.wardrobe.username}, ${DEATH_MESSAGES[Math.floor(Math.random() * DEATH_MESSAGES.length)].replace(/[.!…]+$/, "")}!`; deathUntil = performance.now() + 900;
       screen = "dead"; shake = 10; music.blip(110, 0.18);
     };
     const clearLevel = () => {
@@ -402,7 +459,7 @@ export default function GameCanvas() {
       save.progress[world] = Math.max(save.progress[world] || 0, currentLevel);
       persist(save);
       stage = stageFor(world, currentLevel, save); player = createPlayer(stage); cameraX = 0;
-      clearMessage = `JAPA DOOR CLEARED · WORLD ${world + 1} // LEVEL ${currentLevel}`;
+      clearMessage = `${save.wardrobe.username} don survive this one! · WORLD ${world + 1} // LEVEL ${currentLevel}`;
       clearUntil = performance.now() + 1800; screen = "playing"; music.blip(740, 0.18);
     };
     const goBack = () => { screen = screen === "playing" || screen === "paused" || screen === "dead" ? "worlds" : "title"; };
@@ -439,10 +496,20 @@ export default function GameCanvas() {
             const column = Math.floor((p.x - 90) / 165); const row = p.y < 265 ? 0 : 1; const selectedLevel = row * 5 + column + 1;
             if (column >= 0 && column < 5 && (adminMode || selectedLevel <= (save.progress[world] || 0))) startGame(world, selectedLevel);
           } else if (p.y > 430) screen = "worlds";
+      } else if (screen === "wardrobe") {
+        if (p.y > 90 && p.y < 140) { wardrobeTab = p.x < 325 ? "A" : "B"; }
+        else if (p.x < 650 && p.y >= 150 && p.y < 265) { const index = Math.floor((p.x - 60) / 145) + Math.floor((p.y - 158) / 48) * 4; const items = wardrobeItems(); if (index >= 0 && index < items.tops.length) chooseWardrobeItem(items.tops[index]); }
+        else if (p.x < 650 && p.y >= (wardrobeTab === "B" ? 315 : 275) && p.y < (wardrobeTab === "B" ? 485 : 385)) { const bottomBase = wardrobeTab === "B" ? 316 : 282; const index = Math.floor((p.x - 60) / 145) + Math.floor((p.y - bottomBase) / 48) * 4; const items = wardrobeItems(); if (index >= 0 && index < items.bottoms.length) chooseWardrobeItem(items.bottoms[index]); }
+        else if (p.x > 660 && p.y > 325 && p.y < 365) cycleBadge();
+        else if (p.x > 660 && p.y > 365 && p.y < 415) editUsername();
+        else if (p.x > 660 && p.y > 415 && p.y < 465) { if (save.wardrobe.bundleUnlocked || adminMode) { save.wardrobe.nameGlow = !save.wardrobe.nameGlow; persist(save); } else { adminToast = "Golden Name Glow unlocks with Oga Boss."; adminToastUntil = performance.now() + 2200; } }
+        else if (p.x > 660 && p.y > 460 && p.y < 510) buyBundle();
+        else if (p.y > 500) screen = "options";
       } else if (screen === "options" || screen === "credits") {
         if (screen === "options" && p.y > 155 && p.y < 225) cycleMusic();
         else if (screen === "options" && p.y > 225 && p.y < 295) cycleControls();
         else if (screen === "options" && p.y > 295 && p.y < 370) void configureStreamer();
+        else if (screen === "options" && p.y > 370 && p.y < 435) screen = "wardrobe";
         else if (p.y > 440) screen = "title";
       } else if (screen === "paused") {
         if (p.y > 165 && p.y < 225) screen = "playing";
@@ -606,8 +673,8 @@ export default function GameCanvas() {
       }
       // Exit door and route markers
       ctx.fillStyle = "#123d2c"; ctx.fillRect(stage.exitX, 390, 58, 80); ctx.fillStyle = "#62d477"; ctx.fillRect(stage.exitX + 7, 397, 44, 73); ctx.fillStyle = "#dff6af"; ctx.fillRect(stage.exitX + 13, 406, 32, 51); ctx.fillStyle = "#1d4d34"; ctx.fillRect(stage.exitX + 37, 431, 4, 4); drawText(ctx, "JAPA", stage.exitX + 29, 382, 11, "#8ce49a", "center", "DM Mono");
-      // Player
-      ctx.fillStyle = "#12161c"; ctx.fillRect(player.x - 2, player.y + 7, 20, 18); ctx.fillStyle = "#e7a56e"; ctx.fillRect(player.x + 3, player.y, 11, 9); ctx.fillStyle = "#141518"; ctx.fillRect(player.x + 2, player.y - 2, 13, 4); ctx.fillStyle = world === 1 ? "#dc5145" : world === 2 ? "#e1b44e" : "#65bb71"; ctx.fillRect(player.x + 1, player.y + 9, 14, 11); ctx.fillStyle = "#f3ddba"; ctx.fillRect(player.x + 2, player.y + 21, 5, 5); ctx.fillRect(player.x + 10, player.y + 21, 5, 5);
+      // Player: one grayscale base silhouette, tinted by the isolated wardrobe group.
+      drawAvatar(ctx, player.x, player.y, 1, save.wardrobe, save.wardrobe.username);
       if (onlineMode) {
         for (const remote of remotePlayers) {
           ctx.globalAlpha = 0.58; ctx.fillStyle = "#5cc7b2"; ctx.fillRect(remote.x - 2, remote.y + 7, 20, 18); ctx.fillStyle = "#d49b76"; ctx.fillRect(remote.x + 3, remote.y, 11, 9); ctx.fillStyle = "#23786d"; ctx.fillRect(remote.x + 1, remote.y + 9, 14, 11); ctx.globalAlpha = 1;
@@ -686,7 +753,18 @@ export default function GameCanvas() {
       drawText(ctx, adminMode ? "ADMIN MODE · ALL 40 ROOMS AVAILABLE" : `PROGRESS ${save.progress[world] || 0}/10`, 72, 405, 12, adminMode ? "#cbb7ff" : "#f3cc65", "left", "DM Mono");
       drawButton(ctx, "BACK TO WORLDS", 72, 446, 205, 42, "#73858b", true);
     };
-    const drawOptions = () => { drawOverlay(); drawText(ctx, "ADJUST YOUR WAHALA", 80, 80, 32, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "the controls are already stressful enough", 82, 113, 13, "#8e978c", "left", "DM Mono"); drawButton(ctx, `MUSIC  //  ${MUSIC_TRACKS[musicTrack]}`, 82, 168, 420, 52, musicTrack === 0 ? "#73858b" : "#72c67f"); drawButton(ctx, `TOUCH CONTROLS  //  ${controlScale.toFixed(1)}x ${controlScale === 0.8 ? "SMALL" : controlScale === 1 ? "MEDIUM" : "LARGE"}`, 82, 236, 420, 52, "#c7a657"); drawButton(ctx, `STREAMER MODE  //  ${streamerEnabled ? "ON" : "OFF"}`, 82, 304, 420, 52, streamerEnabled ? "#72c67f" : "#73858b"); drawText(ctx, "tap a button to cycle. settings persist on this device.", 82, 402, 13, "#98a094", "left", "DM Mono"); drawButton(ctx, "BACK TO MENU", 82, 462, 188, 42, "#73858b", true); };
+    const drawOptions = () => { drawOverlay(); drawText(ctx, "ADJUST YOUR WAHALA", 80, 80, 32, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "the controls are already stressful enough", 82, 113, 13, "#8e978c", "left", "DM Mono"); drawButton(ctx, `MUSIC  //  ${MUSIC_TRACKS[musicTrack]}`, 82, 168, 420, 52, musicTrack === 0 ? "#73858b" : "#72c67f"); drawButton(ctx, `TOUCH CONTROLS  //  ${controlScale.toFixed(1)}x ${controlScale === 0.8 ? "SMALL" : controlScale === 1 ? "MEDIUM" : "LARGE"}`, 82, 236, 420, 52, "#c7a657"); drawButton(ctx, `STREAMER MODE  //  ${streamerEnabled ? "ON" : "OFF"}`, 82, 304, 420, 52, streamerEnabled ? "#72c67f" : "#73858b"); drawButton(ctx, "FLEX WARDROBE  //  OUTFIT + USERNAME", 82, 372, 420, 52, "#b78cff"); drawText(ctx, "tap a button to cycle. settings persist on this device.", 82, 442, 13, "#98a094", "left", "DM Mono"); drawButton(ctx, "BACK TO MENU", 82, 478, 188, 42, "#73858b", true); };
+    const drawWardrobe = () => {
+      const activeTab: "A" | "B" = wardrobeTab;
+      const bottomBase = String(activeTab) === "B" ? 316 : 282;
+      drawOverlay(); drawText(ctx, "FLEX WARDROBE", 60, 42, 30, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, `${save.wardrobe.username} · ${save.wardrobe.equippedGroup === "A" ? "MATTE LOADOUT" : "SOFT LIFE METALS"}`, 62, 72, 12, "#a8afa5", "left", "DM Mono");
+      drawButton(ctx, "STANDARD GEAR  //  FREE", 60, 92, 260, 42, activeTab === "A" ? "#72c67f" : "#58635d", true); drawButton(ctx, "SOFT LIFE METALS  //  PREMIUM", 330, 92, 300, 42, String(activeTab) === "B" ? "#f0c86b" : "#58635d", true);
+      const items = wardrobeItems();
+      const drawItem = (item: WardrobeItem, index: number, y: number) => { const x = 60 + (index % 4) * 145; const yy = y + Math.floor(index / 4) * 48; const unlocked = isUnlocked(item, save.wardrobe); const selected = item.id === save.wardrobe.topId || item.id === save.wardrobe.bottomId; ctx.fillStyle = selected ? "rgba(57,87,62,.95)" : "rgba(18,22,24,.95)"; ctx.fillRect(x, yy, 132, 39); ctx.strokeStyle = unlocked ? item.color : "#555d58"; ctx.strokeRect(x + 1, yy + 1, 130, 37); ctx.fillStyle = item.color; ctx.fillRect(x + 8, yy + 11, 16, 16); drawText(ctx, unlocked ? item.label.replace(" Shorts", "") : `₦${item.price}`, x + 31, yy + 13, 9, unlocked ? "#f7f1e6" : "#8b938b", "left", "DM Mono"); drawText(ctx, selected ? "EQUIPPED" : unlocked ? "EQUIP" : "UNLOCK", x + 31, yy + 28, 8, unlocked ? item.color : "#8b938b", "left", "DM Mono"); };
+      drawText(ctx, "TOPS", 60, 148, 10, "#a4ada2", "left", "DM Mono"); items.tops.forEach((item, index) => drawItem(item, index, 158)); drawText(ctx, "BOTTOMS", 60, bottomBase - 10, 10, "#a4ada2", "left", "DM Mono"); items.bottoms.forEach((item, index) => drawItem(item, index, bottomBase));
+      ctx.fillStyle = "rgba(19,22,24,.96)"; ctx.fillRect(675, 112, 225, 250); ctx.strokeStyle = String(activeTab) === "B" ? "#f0c86b" : "#72c67f"; ctx.strokeRect(676, 113, 223, 248); drawText(ctx, "LIVE FIT CHECK", 787, 136, 11, "#aeb6a9", "center", "DM Mono"); drawAvatar(ctx, 780, 205, 5, save.wardrobe); drawText(ctx, save.wardrobe.titleBadge ? `[${save.wardrobe.titleBadge}] ${save.wardrobe.username}` : save.wardrobe.username, 787, 300, 11, save.wardrobe.nameGlow ? "#ffe7a0" : "#f7f1e6", "center", "DM Mono");
+      drawButton(ctx, `TITLE BADGE  //  ${save.wardrobe.titleBadge || (save.wardrobe.titleBadgeUnlocked ? "NONE" : "₦200")}`, 675, 330, 225, 32, save.wardrobe.titleBadgeUnlocked ? "#72c67f" : "#f0c86b", true); drawButton(ctx, "EDIT GAMER USERNAME", 675, 375, 225, 38, "#72c67f", true); drawButton(ctx, `GOLDEN NAME GLOW  //  ${save.wardrobe.nameGlow ? "ON" : "OFF"}`, 675, 420, 225, 38, save.wardrobe.nameGlow ? "#f0c86b" : "#73858b", true); drawButton(ctx, save.wardrobe.bundleUnlocked ? "OGA BOSS BUNDLE  //  UNLOCKED" : "OGA BOSS BUNDLE  //  ₦2,000", 675, 465, 225, 38, "#b78cff", true); drawText(ctx, `GBESE AVAILABLE  ₦${save.debt.toLocaleString("en-NG")}`, 60, 485, 11, "#f3cc65", "left", "DM Mono"); drawButton(ctx, "BACK TO SETTINGS", 60, 505, 190, 28, "#73858b", true);
+    };
     const drawCredits = () => { drawOverlay(); drawText(ctx, "PEOPLE WEY HELP BUILD THIS SHEGE", 74, 58, 26, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "A tiny arcade built with big wahala.", 76, 88, 12, "#8e978c", "left", "DM Mono"); drawText(ctx, "DESIGN", 80, 132, 11, "#72c67f", "left", "DM Mono"); drawText(ctx, "You + The Village People", 80, 153, 16, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "ENGINE", 80, 190, 11, "#c7a657", "left", "DM Mono"); drawText(ctx, "Canvas API · Vite · React · TypeScript", 80, 211, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Web Audio API · Express + Socket.io", 80, 231, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "MUSIC", 80, 270, 11, "#73858b", "left", "DM Mono"); drawText(ctx, "Chiptune + Fuji · Afro-Beats Rush", 80, 291, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Street-Pop Chaos", 80, 311, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Frantic Talking Drum Dept.", 80, 331, 12, "#a5aaa1", "left", "DM Mono"); drawText(ctx, "DEVELOPER", 80, 370, 11, "#e65c4b", "left", "DM Mono"); drawText(ctx, "Azamen (Alpha Collective Corporation)", 80, 394, 17, "#f7f1e6", "left", "Space Grotesk"); drawButton(ctx, "BACK TO MENU", 80, 454, 188, 42, "#73858b", true); };
     const drawPause = () => { drawOverlay(); drawText(ctx, "HOLD ON SMALL", W / 2, 95, 34, "#f7f1e6", "center", "Space Grotesk"); drawText(ctx, "the shege is still here when you return", W / 2, 130, 13, "#9aa297", "center", "DM Mono"); drawButton(ctx, "WE MOVE", 335, 170, 290, 48, WORLD_COLORS[world]); drawButton(ctx, "TRY THIS SHEGE AGAIN", 335, 235, 290, 48, "#c7a657"); if (adminMode && !onlineMode) drawButton(ctx, "SKIP LEVEL  //  ADMIN MODE", 335, 300, 290, 48, "#b78cff"); drawButton(ctx, "JAPA FROM THE GAME", 335, adminMode && !onlineMode ? 365 : 300, 290, 48, "#73858b"); if (adminMode && !onlineMode) drawText(ctx, "OFFLINE GOD MODE ENABLED", W / 2, 445, 11, "#b78cff", "center", "DM Mono"); };
     const drawDead = () => { drawWorld(performance.now()); ctx.fillStyle = "rgba(71,20,26,.72)"; ctx.fillRect(0, 0, W, H); drawText(ctx, deathMessage, W / 2, 208, 26, "#fff0dc", "center", "Space Grotesk"); drawText(ctx, `GBESE +₦${deathPenalty}`, W / 2, 250, 18, "#ffbc6b", "center", "DM Mono"); drawText(ctx, "respawning in a blink...", W / 2, 300, 12, "#efb7a4", "center", "DM Mono"); };
@@ -694,7 +772,8 @@ export default function GameCanvas() {
 
     const draw = (now: number) => {
       ctx.save(); ctx.setTransform(canvas.width / W, 0, 0, canvas.height / H, 0, 0); ctx.clearRect(0, 0, W, H);
-      if (screen === "title") drawTitle(); else if (screen === "worlds") drawWorlds(); else if (screen === "levels") drawLevels(); else if (screen === "arena") drawArena(); else if (screen === "options") drawOptions(); else if (screen === "credits") drawCredits(); else if (screen === "playing") drawWorld(now); else if (screen === "paused") { drawWorld(now); drawPause(); } else if (screen === "dead") drawDead(); else if (screen === "clear") drawClear();
+      if (screen === "title") drawTitle(); else if (screen === "worlds") drawWorlds(); else if (screen === "levels") drawLevels(); else if (screen === "wardrobe") drawWardrobe(); else if (screen === "arena") drawArena(); else if (screen === "options") drawOptions(); else if (screen === "credits") drawCredits(); else if (screen === "playing") drawWorld(now); else if (screen === "paused") { drawWorld(now); drawPause(); } else if (screen === "dead") drawDead(); else if (screen === "clear") drawClear();
+      if (clearMessage && now < clearUntil) { ctx.fillStyle = "rgba(18,37,28,.96)"; ctx.fillRect(160, 72, 640, 48); ctx.strokeStyle = "#72c67f"; ctx.lineWidth = 2; ctx.strokeRect(161, 73, 638, 46); drawText(ctx, clearMessage, W / 2, 96, 14, "#d8f6b4", "center", "DM Mono"); }
       if (adminToast && now < adminToastUntil) { ctx.fillStyle = "rgba(19,13,31,.96)"; ctx.fillRect(170, 24, 620, 48); ctx.strokeStyle = "#b78cff"; ctx.lineWidth = 2; ctx.strokeRect(171, 25, 618, 46); drawText(ctx, adminToast, W / 2, 48, 15, "#f0ddff", "center", "DM Mono"); }
       ctx.restore();
     };
