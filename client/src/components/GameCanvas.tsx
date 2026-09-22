@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { connectArena, type ArenaConnection, type ArenaLeaderboardEntry, type ArenaTrap, type RemotePlayer, type StreamerEvent } from "../game/online";
 import { getLevel, type WorldIndex } from "../game/levelData";
 
-type Screen = "title" | "worlds" | "arena" | "options" | "credits" | "playing" | "paused" | "dead" | "clear";
+type Screen = "title" | "worlds" | "levels" | "arena" | "options" | "credits" | "playing" | "paused" | "dead" | "clear";
 type Platform = { x: number; y: number; w: number; h: number; vanish?: boolean; color?: string };
 type HazardKind =
   | "spike"
@@ -33,7 +33,7 @@ type Hazard = {
   triggered?: boolean;
 };
 type KeyPickup = { id: string; x: number; y: number; collected: boolean };
-type SaveData = { debt: number; keys: number; unlocked: number; keyIds: string[]; adminMode: boolean };
+type SaveData = { debt: number; keys: number; unlocked: number; keyIds: string[]; adminMode: boolean; progress: number[] };
 type Stage = {
   world: WorldIndex;
   width: number;
@@ -76,9 +76,10 @@ function loadSave(): SaveData {
       unlocked: Math.min(3, Math.max(0, Number(stored?.unlocked) || 0)),
       keyIds: Array.isArray(stored?.keyIds) ? stored!.keyIds! : [],
       adminMode: stored?.adminMode === true,
+      progress: Array.isArray(stored?.progress) ? stored!.progress!.map((value) => Math.max(0, Math.min(10, Number(value) || 0))).slice(0, 4).concat([0, 0, 0, 0]).slice(0, 4) : [1, 0, 0, 0],
     };
   } catch {
-    return { debt: 0, keys: 0, unlocked: 0, keyIds: [], adminMode: false };
+    return { debt: 0, keys: 0, unlocked: 0, keyIds: [], adminMode: false, progress: [1, 0, 0, 0] };
   }
 }
 
@@ -307,7 +308,7 @@ export default function GameCanvas() {
     const enableAdminMode = () => {
       if (adminMode) return;
       adminMode = true;
-      save = { ...save, adminMode: true, unlocked: 3, keys: 10, debt: 999999 };
+      save = { ...save, adminMode: true, unlocked: 3, keys: 10, debt: 999999, progress: [10, 10, 10, 10] };
       persist(save);
       music.start();
       if (music.ctx) {
@@ -398,6 +399,7 @@ export default function GameCanvas() {
       save.debt = Math.max(0, save.debt - 2000);
       if (currentLevel < 10) currentLevel += 1;
       else if (world < 3) { save.unlocked = Math.max(save.unlocked, world + 1); world = (world + 1) as WorldIndex; currentLevel = 1; }
+      save.progress[world] = Math.max(save.progress[world] || 0, currentLevel);
       persist(save);
       stage = stageFor(world, currentLevel, save); player = createPlayer(stage); cameraX = 0;
       clearMessage = `JAPA DOOR CLEARED · WORLD ${world + 1} // LEVEL ${currentLevel}`;
@@ -419,19 +421,24 @@ export default function GameCanvas() {
       }
       if (screen === "title") {
         if (p.x >= 70 && p.x <= 450 && p.y >= 105 && p.y <= 275) registerTitleTap(performance.now());
-        if (p.x > 520 && p.y > 300 && p.y < 390) enterArena();
-        else if (p.y > 285 && p.y < 345) screen = "worlds";
-        else if (p.y > 350 && p.y < 405) screen = "options";
-        else if (p.y > 410 && p.y < 465) screen = "credits";
+        if (p.x > 520 && p.y > 315 && p.y < 380) enterArena();
+        else if (p.x >= 70 && p.x <= 470 && p.y > 315 && p.y < 380) screen = "worlds";
+        else if (p.x >= 70 && p.x <= 430 && p.y > 380 && p.y < 430) screen = "options";
+        else if (p.x >= 70 && p.x <= 430 && p.y > 430 && p.y < 485) screen = "credits";
       } else if (screen === "arena") {
         if (p.y > 260 && p.y < 325) { world = 0; currentLevel = 1; stage = stageFor(world, currentLevel, save); player = createPlayer(stage); screen = "playing"; arenaNotice = "Arena live. Sabotage tokens ready."; }
         else if (p.y > 345 && p.y < 405) void configureStreamer();
         else if (p.y > 435) leaveArena();
-      } else if (screen === "worlds") {
-        if (p.y > 145 && p.y < 350) {
-          const pick = Math.floor((p.x - 70) / 220) as WorldIndex;
-          if (pick >= 0 && pick <= 3 && pick <= save.unlocked) startGame(pick);
-        } else if (p.y > 450) screen = "title";
+        } else if (screen === "worlds") {
+          if (p.y > 145 && p.y < 350) {
+            const pick = Math.floor((p.x - 70) / 220) as WorldIndex;
+          if (pick >= 0 && pick <= 3 && pick <= save.unlocked) { world = pick; screen = "levels"; }
+          } else if (p.y > 450) screen = "title";
+        } else if (screen === "levels") {
+          if (p.y > 145 && p.y < 385) {
+            const column = Math.floor((p.x - 90) / 165); const row = p.y < 265 ? 0 : 1; const selectedLevel = row * 5 + column + 1;
+            if (column >= 0 && column < 5 && (adminMode || selectedLevel <= (save.progress[world] || 0))) startGame(world, selectedLevel);
+          } else if (p.y > 430) screen = "worlds";
       } else if (screen === "options" || screen === "credits") {
         if (screen === "options" && p.y > 155 && p.y < 225) cycleMusic();
         else if (screen === "options" && p.y > 225 && p.y < 295) cycleControls();
@@ -664,6 +671,21 @@ export default function GameCanvas() {
       }
       drawText(ctx, `GBESE ₦${save.debt.toLocaleString("en-NG")}  ·  JAPA KEYS ${save.keys}/10`, 72, 431, 13, "#f3cc65", "left", "DM Mono"); drawButton(ctx, "I DON TIRE — BACK", 70, 466, 205, 42, "#73858b", true);
     };
+    const drawLevels = () => {
+      drawOverlay();
+      drawText(ctx, `WORLD ${world + 1} // ${WORLD_NAMES[world].toUpperCase()}`, 72, 66, 30, WORLD_COLORS[world], "left", "Space Grotesk");
+      drawText(ctx, `${WORLD_SUBTITLES[world]} · choose a fixed room`, 74, 96, 13, "#a2aaa0", "left", "DM Mono");
+      for (let level = 1; level <= 10; level += 1) {
+        const column = (level - 1) % 5; const row = Math.floor((level - 1) / 5); const x = 90 + column * 165; const y = 140 + row * 120;
+        const unlocked = adminMode || level <= (save.progress[world] || 0); const accent = unlocked ? WORLD_COLORS[world] : "#4a514e";
+        ctx.fillStyle = unlocked ? "rgba(20,24,24,.97)" : "rgba(24,27,27,.78)"; ctx.fillRect(x, y, 135, 82); ctx.strokeStyle = accent; ctx.lineWidth = 2; ctx.strokeRect(x + 1, y + 1, 133, 80);
+        drawText(ctx, `LEVEL ${String(level).padStart(2, "0")}`, x + 14, y + 28, 14, unlocked ? "#f7f1e6" : "#66706a", "left", "DM Mono");
+        drawText(ctx, unlocked ? (adminMode ? "ADMIN ACCESS" : level < (save.progress[world] || 0) ? "CLEARED" : "NEXT ROOM") : "LOCKED", x + 14, y + 55, 10, accent, "left", "DM Mono");
+        drawText(ctx, `[${"■".repeat(Math.min(level, 10))}${"□".repeat(10 - Math.min(level, 10))}]`, x + 14, y + 72, 8, accent, "left", "DM Mono");
+      }
+      drawText(ctx, adminMode ? "ADMIN MODE · ALL 40 ROOMS AVAILABLE" : `PROGRESS ${save.progress[world] || 0}/10`, 72, 405, 12, adminMode ? "#cbb7ff" : "#f3cc65", "left", "DM Mono");
+      drawButton(ctx, "BACK TO WORLDS", 72, 446, 205, 42, "#73858b", true);
+    };
     const drawOptions = () => { drawOverlay(); drawText(ctx, "ADJUST YOUR WAHALA", 80, 80, 32, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "the controls are already stressful enough", 82, 113, 13, "#8e978c", "left", "DM Mono"); drawButton(ctx, `MUSIC  //  ${MUSIC_TRACKS[musicTrack]}`, 82, 168, 420, 52, musicTrack === 0 ? "#73858b" : "#72c67f"); drawButton(ctx, `TOUCH CONTROLS  //  ${controlScale.toFixed(1)}x ${controlScale === 0.8 ? "SMALL" : controlScale === 1 ? "MEDIUM" : "LARGE"}`, 82, 236, 420, 52, "#c7a657"); drawButton(ctx, `STREAMER MODE  //  ${streamerEnabled ? "ON" : "OFF"}`, 82, 304, 420, 52, streamerEnabled ? "#72c67f" : "#73858b"); drawText(ctx, "tap a button to cycle. settings persist on this device.", 82, 402, 13, "#98a094", "left", "DM Mono"); drawButton(ctx, "BACK TO MENU", 82, 462, 188, 42, "#73858b", true); };
     const drawCredits = () => { drawOverlay(); drawText(ctx, "PEOPLE WEY HELP BUILD THIS SHEGE", 74, 58, 26, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "A tiny arcade built with big wahala.", 76, 88, 12, "#8e978c", "left", "DM Mono"); drawText(ctx, "DESIGN", 80, 132, 11, "#72c67f", "left", "DM Mono"); drawText(ctx, "You + The Village People", 80, 153, 16, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "ENGINE", 80, 190, 11, "#c7a657", "left", "DM Mono"); drawText(ctx, "Canvas API · Vite · React · TypeScript", 80, 211, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Web Audio API · Express + Socket.io", 80, 231, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "MUSIC", 80, 270, 11, "#73858b", "left", "DM Mono"); drawText(ctx, "Chiptune + Fuji · Afro-Beats Rush", 80, 291, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Street-Pop Chaos", 80, 311, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Frantic Talking Drum Dept.", 80, 331, 12, "#a5aaa1", "left", "DM Mono"); drawText(ctx, "DEVELOPER", 80, 370, 11, "#e65c4b", "left", "DM Mono"); drawText(ctx, "Azamen (Alpha Collective Corporation)", 80, 394, 17, "#f7f1e6", "left", "Space Grotesk"); drawButton(ctx, "BACK TO MENU", 80, 454, 188, 42, "#73858b", true); };
     const drawPause = () => { drawOverlay(); drawText(ctx, "HOLD ON SMALL", W / 2, 95, 34, "#f7f1e6", "center", "Space Grotesk"); drawText(ctx, "the shege is still here when you return", W / 2, 130, 13, "#9aa297", "center", "DM Mono"); drawButton(ctx, "WE MOVE", 335, 170, 290, 48, WORLD_COLORS[world]); drawButton(ctx, "TRY THIS SHEGE AGAIN", 335, 235, 290, 48, "#c7a657"); if (adminMode && !onlineMode) drawButton(ctx, "SKIP LEVEL  //  ADMIN MODE", 335, 300, 290, 48, "#b78cff"); drawButton(ctx, "JAPA FROM THE GAME", 335, adminMode && !onlineMode ? 365 : 300, 290, 48, "#73858b"); if (adminMode && !onlineMode) drawText(ctx, "OFFLINE GOD MODE ENABLED", W / 2, 445, 11, "#b78cff", "center", "DM Mono"); };
@@ -672,7 +694,7 @@ export default function GameCanvas() {
 
     const draw = (now: number) => {
       ctx.save(); ctx.setTransform(canvas.width / W, 0, 0, canvas.height / H, 0, 0); ctx.clearRect(0, 0, W, H);
-      if (screen === "title") drawTitle(); else if (screen === "worlds") drawWorlds(); else if (screen === "arena") drawArena(); else if (screen === "options") drawOptions(); else if (screen === "credits") drawCredits(); else if (screen === "playing") drawWorld(now); else if (screen === "paused") { drawWorld(now); drawPause(); } else if (screen === "dead") drawDead(); else if (screen === "clear") drawClear();
+      if (screen === "title") drawTitle(); else if (screen === "worlds") drawWorlds(); else if (screen === "levels") drawLevels(); else if (screen === "arena") drawArena(); else if (screen === "options") drawOptions(); else if (screen === "credits") drawCredits(); else if (screen === "playing") drawWorld(now); else if (screen === "paused") { drawWorld(now); drawPause(); } else if (screen === "dead") drawDead(); else if (screen === "clear") drawClear();
       if (adminToast && now < adminToastUntil) { ctx.fillStyle = "rgba(19,13,31,.96)"; ctx.fillRect(170, 24, 620, 48); ctx.strokeStyle = "#b78cff"; ctx.lineWidth = 2; ctx.strokeRect(171, 25, 618, 46); drawText(ctx, adminToast, W / 2, 48, 15, "#f0ddff", "center", "DM Mono"); }
       ctx.restore();
     };
