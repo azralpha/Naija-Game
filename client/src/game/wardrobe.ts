@@ -16,9 +16,9 @@ export const GROUP_A_BOTTOMS: WardrobeItem[] = [
 ];
 
 const METALS: Array<[string, string, string]> = [
-  ["silver", "Silver", "#C0C0C0"], ["chrome", "Chrome", "#E8E8E8"], ["gunmetal", "Gunmetal", "#2A3439"],
-  ["pewter", "Pewter", "#899499"], ["titanium", "Titanium", "#878681"], ["pearl", "Pearl", "#F0EAD6"],
-  ["electrum", "Electrum", "#CBD5E1"], ["emerald", "Metallic Emerald", "#50C878"], ["sapphire", "Sapphire Sparkle", "#0F52BA"], ["midnight", "Metallic Midnight Blue", "#1A1110"],
+  ["silver", "Silver", "#C0C0C0"], ["chrome", "Chrome", "#E2F0CB"], ["gunmetal", "Gunmetal", "#2A3439"],
+  ["pewter", "Pewter", "#899499"], ["titanium", "Titanium", "#878681"], ["pearl", "Pearl", "#FDEEF4"],
+  ["electrum", "Electrum", "#D4AF37"], ["emerald", "Metallic Emerald", "#50C878"], ["sapphire", "Sapphire Sparkle", "#0F52BA"], ["midnight", "Metallic Midnight Blue", "#003366"],
 ];
 export const GROUP_B_TOPS: WardrobeItem[] = METALS.map(([id, label, color]) => ({ id: `b-top-${id}`, label: `${label} Top`, color, group: "B", price: 300 }));
 export const GROUP_B_BOTTOMS: WardrobeItem[] = METALS.map(([id, label, color]) => ({ id: `b-bottom-${id}`, label: `${label} Shorts`, color, group: "B", price: 300 }));

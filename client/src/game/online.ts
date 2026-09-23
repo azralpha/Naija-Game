@@ -19,7 +19,7 @@ export type ArenaTrap = {
   expiresAt: number;
 };
 
-export type ArenaLeaderboardEntry = { id: string; name: string; gbese: number };
+export type ArenaLeaderboardEntry = { id: string; name: string; gbese: number; level?: number };
 export type StreamerEvent = { command: "echoke" | "upnepa" | "villagepeople" | "godabeg"; by: string };
 
 export type ArenaConnection = {

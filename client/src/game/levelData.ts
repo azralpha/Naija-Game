@@ -1,5 +1,5 @@
 export type WorldIndex = 0 | 1 | 2 | 3;
-export type LevelHazardKind = "spike" | "disappear" | "movingWall" | "lateSpike" | "reverse" | "gravityFlip" | "multi" | "teleporter";
+export type LevelHazardKind = "spike" | "disappear" | "movingWall" | "lateSpike" | "reverse" | "gravityFlip" | "multi" | "teleporter" | "jumpPad" | "safetyTile" | "glue" | "boulder" | "shoker" | "fakeKey" | "fakeCoin" | "mudSweep";
 export type LevelPlatform = { x: number; y: number; w: number; h: number; color: string };
 export type LevelHazard = { kind: LevelHazardKind; x: number; y: number; w: number; h: number; penalty: number; label: string; phase?: number };
 export type LevelDefinition = { world: WorldIndex; level: number; name: string; map: string[]; platforms: LevelPlatform[]; hazards: LevelHazard[]; exitX: number; spawn: { x: number; y: number }; width: number };
@@ -84,6 +84,15 @@ function tileRowsToDefinition(world: WorldIndex, level: number, rows: string[]):
   } else if (world === 0 && (level === 2 || level === 3)) {
     hazards.push({ kind: "disappear", x: 320 + level * 46, y: 448, w: 62, h: 24, penalty: 90, label: "SAPA FLOOR" });
   }
+  const utilityX = 230 + ((world * 97 + level * 61) % 620);
+  hazards.push({ kind: "jumpPad", x: utilityX, y: 430, w: 54, h: 20, penalty: 0, label: "AWOOF JUMP PAD" });
+  hazards.push({ kind: "safetyTile", x: Math.min(utilityX + 170, 820), y: 310, w: 54, h: 18, penalty: 0, label: "FLOATING SAFETY TILE" });
+  if (level % 3 === 0) hazards.push({ kind: "glue", x: utilityX + 80, y: 430, w: 58, h: 20, penalty: 140, label: "GBESE GLUE" });
+  if (world >= 1 && level % 2 === 0) hazards.push({ kind: "boulder", x: 520, y: 250, w: 30, h: 30, penalty: 220, label: "SAPA BOULDER" });
+  if (world >= 2 && level % 3 === 1) hazards.push({ kind: "shoker", x: 650, y: 300, w: 62, h: 150, penalty: 260, label: "SHOKER TUNNEL" });
+  if (world >= 1 && level % 4 === 0) hazards.push({ kind: "fakeKey", x: 560, y: 350, w: 30, h: 34, penalty: 180, label: "FAKE JAPA KEY" });
+  if (world >= 1 && level % 5 === 0) hazards.push({ kind: "fakeCoin", x: 760, y: 348, w: 28, h: 28, penalty: 2000, label: "FAKE COIN DROP" });
+  if (world === 2 && level % 2 === 1) hazards.push({ kind: "mudSweep", x: 420, y: 430, w: 260, h: 20, penalty: 190, label: "TRENCHES MUD SWEEP" });
   // The door is intentionally not always on the same tile even when the room ends.
   exitX = Math.min(rows[0].length * 64 - 90, exitX + ((world * 10 + level) * 37) % 160);
   return { world, level, name: `${WORLD_NAMES[world]} ${level}`, map: rows, platforms, hazards, exitX, spawn, width: rows[0].length * 64 };

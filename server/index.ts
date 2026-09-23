@@ -14,6 +14,8 @@ type PlayerState = {
   direction: -1 | 0 | 1;
   jumping: boolean;
   gbese: number;
+  level: number;
+  eliminated: boolean;
   traps: Record<TrapType, number>;
 };
 type Trap = { id: string; ownerId: string; x: number; y: number; trapType: TrapType; expiresAt: number };
@@ -22,7 +24,7 @@ type Room = { id: string; players: Map<string, PlayerState>; traps: Map<string, 
 const rooms = new Map<string, Room>();
 const watchers = new Map<string, { stop: () => void }>();
 const MAX_PLAYERS = 50;
-const TRAP_REWARD = 200;
+const TRAP_REWARD = 500;
 const TRAP_TYPES: TrapType[] = ["sapa_floor", "shege_spike", "awoof_platform"];
 const COMMANDS = new Set(["echoke", "upnepa", "villagepeople", "godabeg"]);
 
@@ -36,7 +38,7 @@ function roomPayload(room: Room) {
   return Array.from(room.players.values()).map(({ traps: _traps, ...player }) => player);
 }
 function leaderboardPayload(room: Room) {
-  return Array.from(room.players.values()).map((player) => ({ id: player.id, name: player.name, gbese: player.gbese })).sort((a, b) => a.gbese - b.gbese);
+  return Array.from(room.players.values()).map((player) => ({ id: player.id, name: player.name, gbese: player.gbese, level: player.level })).sort((a, b) => a.gbese - b.gbese || b.level - a.level).slice(0, 10);
 }
 function broadcastRoom(io: SocketIOServer, room: Room) {
   io.to(room.id).emit("room_players", roomPayload(room));
@@ -136,13 +138,13 @@ async function startServer() {
       const room = getRoom(roomId);
       if (room.players.size >= MAX_PLAYERS) return socket.emit("arena_notice", { message: "That arena is full. Try quick-match again." });
       playerId = socket.id;
-      const player: PlayerState = { id: playerId, name: String(payload?.playerName || `Player ${playerId.slice(0, 4)}`).slice(0, 18), x: 70, y: 420, direction: 0, jumping: false, gbese: 0, traps: { sapa_floor: 1, shege_spike: 1, awoof_platform: 1 } };
+      const player: PlayerState = { id: playerId, name: String(payload?.playerName || `Player ${playerId.slice(0, 4)}`).slice(0, 18), x: 70, y: 420, direction: 0, jumping: false, gbese: 0, level: 1, eliminated: false, traps: { sapa_floor: 1, shege_spike: 1, awoof_platform: 1 } };
       currentRoom = room; room.players.set(playerId, player); socket.join(room.id);
       socket.emit("room_joined", { roomId: room.id, playerId, players: roomPayload(room) }); broadcastRoom(io, room);
     });
     socket.on("player_state", (payload: Partial<PlayerState>) => {
       const player = currentRoom?.players.get(playerId); if (!player) return;
-      player.x = Math.max(0, Math.min(4320, Number(payload.x) || 0)); player.y = Math.max(-200, Math.min(600, Number(payload.y) || 0)); player.direction = payload.direction === -1 || payload.direction === 1 ? payload.direction : 0; player.jumping = Boolean(payload.jumping); if (typeof payload.gbese === "number") player.gbese = Math.max(0, Math.min(999999, Math.round(payload.gbese)));
+      player.x = Math.max(0, Math.min(4320, Number(payload.x) || 0)); player.y = Math.max(-200, Math.min(600, Number(payload.y) || 0)); player.direction = payload.direction === -1 || payload.direction === 1 ? payload.direction : 0; player.jumping = Boolean(payload.jumping); if (typeof payload.gbese === "number") player.gbese = Math.max(0, Math.min(999999, Math.round(payload.gbese))); if (typeof payload.level === "number") player.level = Math.max(1, Math.min(40, Math.round(payload.level)));
     });
     socket.on("place_trap", (payload: { x: number; y: number; trapType: TrapType }) => {
       const player = currentRoom?.players.get(playerId); if (!currentRoom || !player || !TRAP_TYPES.includes(payload?.trapType)) return;
@@ -154,9 +156,10 @@ async function startServer() {
     socket.on("trap_hit", (payload: { trapId: string; victimId?: string }) => {
       const room = currentRoom; const trap = room?.traps.get(payload?.trapId); if (!room || !trap || trap.ownerId === playerId) return;
       const victim = room.players.get(playerId); const owner = room.players.get(trap.ownerId); if (!victim || !owner) return;
-      victim.gbese += TRAP_REWARD; owner.gbese = Math.max(0, owner.gbese - TRAP_REWARD); broadcastRoom(io, room); io.to(room.id).emit("arena_notice", { message: `${owner.name} collected a ₦200 trap reward.` }); room.traps.delete(trap.id);
+      victim.gbese += TRAP_REWARD; owner.gbese = Math.max(0, owner.gbese - TRAP_REWARD); broadcastRoom(io, room); io.to(room.id).emit("arena_notice", { message: `${owner.name} collected a ₦${TRAP_REWARD} trap reward from ${victim.name}.` }); room.traps.delete(trap.id);
     });
     socket.on("chat_trigger", (payload: { command: string }) => { if (currentRoom) emitStreamerEvent(io, currentRoom.id, String(payload?.command || "").replace(/^!/, "").toLowerCase(), playerId); });
+    socket.on("ghost_hazard", (payload: { command: string }) => { if (!currentRoom) return; const command = String(payload?.command || "").toLowerCase(); if (!["upnepa", "villagepeople", "godabeg"].includes(command)) return; io.to(currentRoom.id).emit("streamer_event", { command, by: `${currentRoom.players.get(playerId)?.name || "Ghost"} (spectator)` }); });
     socket.on("leave_room", () => { if (currentRoom) { currentRoom.players.delete(playerId); broadcastRoom(io, currentRoom); if (!currentRoom.players.size) { watchers.get(currentRoom.id)?.stop(); rooms.delete(currentRoom.id); } currentRoom = undefined; } });
     socket.on("disconnect", () => { if (currentRoom) { currentRoom.players.delete(playerId); broadcastRoom(io, currentRoom); if (!currentRoom.players.size) { watchers.get(currentRoom.id)?.stop(); rooms.delete(currentRoom.id); } } });
   });

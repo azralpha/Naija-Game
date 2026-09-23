@@ -3,7 +3,7 @@ import { connectArena, type ArenaConnection, type ArenaLeaderboardEntry, type Ar
 import { getLevel, type WorldIndex } from "../game/levelData";
 import { DEFAULT_WARDROBE, GROUP_A_BOTTOMS, GROUP_A_TOPS, GROUP_B_BOTTOMS, GROUP_B_TOPS, equipItem, isUnlocked, itemById, type WardrobeItem } from "../game/wardrobe";
 
-type Screen = "title" | "worlds" | "levels" | "wardrobe" | "arena" | "options" | "credits" | "playing" | "paused" | "dead" | "clear";
+type Screen = "title" | "worlds" | "levels" | "wardrobe" | "arena" | "options" | "credits" | "playing" | "paused" | "dead" | "spectator" | "clear";
 type Platform = { x: number; y: number; w: number; h: number; vanish?: boolean; color?: string };
 type HazardKind =
   | "spike"
@@ -20,7 +20,16 @@ type HazardKind =
   | "reverse"
   | "teleporter"
   | "slide"
-  | "awoof";
+  | "awoof"
+  | "jumpPad"
+  | "busPlatform"
+  | "safetyTile"
+  | "fakeKey"
+  | "glue"
+  | "boulder"
+  | "shoker"
+  | "fakeCoin"
+  | "mudSweep";
 type Hazard = {
   kind: HazardKind;
   x: number;
@@ -34,7 +43,7 @@ type Hazard = {
   triggered?: boolean;
 };
 type KeyPickup = { id: string; x: number; y: number; collected: boolean };
-type SaveData = { debt: number; keys: number; unlocked: number; keyIds: string[]; adminMode: boolean; progress: number[]; wardrobe: typeof DEFAULT_WARDROBE };
+type SaveData = { debt: number; gu: number; ghostEnergy: number; hasToppedUp: boolean; keys: number; unlocked: number; keyIds: string[]; adminMode: boolean; progress: number[]; wardrobe: typeof DEFAULT_WARDROBE };
 type Stage = {
   world: WorldIndex;
   width: number;
@@ -73,6 +82,7 @@ function loadSave(): SaveData {
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null") as Partial<SaveData> | null;
     return {
       debt: Math.max(0, Number(stored?.debt) || 0),
+      gu: Math.max(0, Number(stored?.gu) || 0), ghostEnergy: Math.max(0, Number(stored?.ghostEnergy) || 0), hasToppedUp: stored?.hasToppedUp === true,
       keys: Math.max(0, Number(stored?.keys) || 0),
       unlocked: Math.min(3, Math.max(0, Number(stored?.unlocked) || 0)),
       keyIds: Array.isArray(stored?.keyIds) ? stored!.keyIds! : [],
@@ -81,7 +91,7 @@ function loadSave(): SaveData {
       wardrobe: { ...DEFAULT_WARDROBE, ...(stored?.wardrobe || {}), unlockedB: Array.isArray(stored?.wardrobe?.unlockedB) ? stored.wardrobe!.unlockedB : [] },
     };
   } catch {
-    return { debt: 0, keys: 0, unlocked: 0, keyIds: [], adminMode: false, progress: [1, 0, 0, 0], wardrobe: { ...DEFAULT_WARDROBE, unlockedB: [] } };
+    return { debt: 0, gu: 0, ghostEnergy: 0, hasToppedUp: false, keys: 0, unlocked: 0, keyIds: [], adminMode: false, progress: [1, 0, 0, 0], wardrobe: { ...DEFAULT_WARDROBE, unlockedB: [] } };
   }
 }
 
@@ -111,10 +121,7 @@ function rectsOverlap(a: { x: number; y: number; w: number; h: number }, b: { x:
 
 function stageFor(world: WorldIndex, level: number, save: SaveData): Stage {
   const definition = getLevel(world, level);
-  const keys: KeyPickup[] = [
-    { id: `${world}-${level}-a`, x: 390, y: 350, collected: false },
-    { id: `${world}-${level}-b`, x: 720, y: 280, collected: false },
-  ];
+  const keys: KeyPickup[] = [{ id: `${world}-${level}-a`, x: 390, y: 350, collected: false }];
   keys.forEach((key) => { key.collected = save.keyIds.includes(key.id); });
   return {
     world,
@@ -303,6 +310,7 @@ export default function GameCanvas() {
     let reverseUntil = 0;
     let fakeJumpUntil = 0;
     let gravityFlipUntil = 0;
+    let glueUntil = 0;
     let shake = 0;
     let standStill = 0;
     let demoTime = 0;
@@ -359,6 +367,13 @@ export default function GameCanvas() {
       if (save.debt < 2000 && !adminMode) { adminToast = "Oga Boss Bundle needs ₦2,000 GB. Payment adapter ready for checkout."; adminToastUntil = performance.now() + 2600; return; }
       save.debt = adminMode ? save.debt : save.debt - 2000;
       save.wardrobe.bundleUnlocked = true; save.wardrobe.nameGlow = true; save.wardrobe.titleBadgeUnlocked = true; save.wardrobe.unlockedB = [...GROUP_B_TOPS, ...GROUP_B_BOTTOMS].map((item) => item.id); persist(save); music.blip(1320, 0.2);
+    };
+    const topUpPacks = [{ label: "SAPA RELIEF", naira: 300, gu: 350 }, { label: "WORKING MAN", naira: 500, gu: 650 }, { label: "OGA BOSS", naira: 1000, gu: 1500 }, { label: "CHAIRMAN", naira: 2000, gu: 3200 }];
+    const beginTopUp = (pack: typeof topUpPacks[number]) => {
+      const checkout = (window as Window & { FlutterwaveCheckout?: (config: Record<string, unknown>) => void }).FlutterwaveCheckout;
+      const publicKey = (import.meta as ImportMeta & { env?: Record<string, string> }).env?.VITE_FLUTTERWAVE_PUBLIC_KEY || "FLWPUBK_TEST-configure-me";
+      if (!checkout || publicKey === "FLWPUBK_TEST-configure-me") { adminToast = "Flutterwave checkout is ready — configure VITE_FLUTTERWAVE_PUBLIC_KEY."; adminToastUntil = performance.now() + 2800; return; }
+      checkout({ public_key: publicKey, tx_ref: `nnl-${Date.now()}`, amount: pack.naira, currency: "NGN", payment_options: "card,banktransfer,ussd", customer: { email: `${save.wardrobe.username.replace(/\s+/g, ".").toLowerCase()}@nnl.game`, name: save.wardrobe.username }, customizations: { title: pack.label, description: `${pack.gu} $GU top-up for Naija Normal Level` }, callback: (response: { status?: string }) => { if (response.status === "successful") { save.gu += pack.gu; save.hasToppedUp = true; persist(save); adminToast = `Top-up complete: +${pack.gu} $GU`; adminToastUntil = performance.now() + 2200; } }, onclose: () => undefined });
     };
     const cycleBadge = () => {
       if (!save.wardrobe.titleBadgeUnlocked && !save.wardrobe.bundleUnlocked && !adminMode) {
@@ -467,6 +482,16 @@ export default function GameCanvas() {
       clearMessage = `${save.wardrobe.username} don survive this one! · WORLD ${world + 1} // LEVEL ${currentLevel}`;
       clearUntil = performance.now() + 1800; screen = "playing"; music.blip(740, 0.18);
     };
+    const shareWahala = async () => {
+      const card = document.createElement("canvas"); card.width = 1200; card.height = 630; const cardCtx = card.getContext("2d"); if (!cardCtx) return;
+      cardCtx.fillStyle = "#0b0c0e"; cardCtx.fillRect(0, 0, card.width, card.height); cardCtx.fillStyle = WORLD_COLORS[world]; cardCtx.fillRect(0, 0, 18, card.height); cardCtx.fillStyle = "#f7f1e6"; cardCtx.font = "700 52px Space Grotesk"; cardCtx.fillText("NAIJA NORMAL LEVEL", 72, 110); cardCtx.font = "28px DM Mono"; cardCtx.fillStyle = "#a7b0a5"; cardCtx.fillText(`${WORLD_NAMES[world].toUpperCase()}  //  LEVEL ${currentLevel}`, 76, 158); cardCtx.fillStyle = "#f0c86b"; cardCtx.fillText(`GBESE  ₦${save.debt.toLocaleString("en-NG")}   ·   $GU ${save.gu}`, 76, 520); cardCtx.fillStyle = "#8bb174"; cardCtx.font = "700 36px DM Mono"; cardCtx.fillText(`${save.wardrobe.titleBadge ? `[${save.wardrobe.titleBadge}] ` : ""}${save.wardrobe.username}`, 76, 238); drawPixelBoy(cardCtx, 840, 160, 10, save.wardrobe, undefined, "idle", elapsed);
+      cardCtx.fillStyle = "#d1d8cd"; cardCtx.font = "24px DM Mono"; cardCtx.fillText("I survived the shege. Your turn.", 76, 585);
+      card.toBlob(async (blob) => { if (!blob) return; const file = new File([blob], "nnl-wahala.png", { type: "image/png" }); const shareData = { title: "Naija Normal Level", text: `${save.wardrobe.username} survived ${WORLD_NAMES[world]} Level ${currentLevel}.`, files: [file] }; try { if (navigator.share && navigator.canShare?.({ files: [file] })) await navigator.share(shareData); else { const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = "nnl-wahala.png"; anchor.click(); URL.revokeObjectURL(url); adminToast = "Wahala card downloaded — post am anywhere."; adminToastUntil = performance.now() + 2200; } } catch { /* share cancelled */ } }, "image/png");
+    };
+    const ghostTrigger = (command: string) => {
+      if (!arenaConnection || save.ghostEnergy < 100) { adminToast = "Need 100 Ghost Energy. Top up with $GU."; adminToastUntil = performance.now() + 2200; return; }
+      save.ghostEnergy -= 100; persist(save); arenaConnection.socket.emit("ghost_hazard", { command }); arenaNotice = `Ghost power fired: ${command}`;
+    };
     const goBack = () => { screen = screen === "playing" || screen === "paused" || screen === "dead" ? "worlds" : "title"; };
 
     const handlePointerDown = (event: PointerEvent) => {
@@ -509,6 +534,7 @@ export default function GameCanvas() {
         else if (p.x > 660 && p.y > 365 && p.y < 415) editUsername();
         else if (p.x > 660 && p.y > 415 && p.y < 465) { if (save.wardrobe.bundleUnlocked || adminMode) { save.wardrobe.nameGlow = !save.wardrobe.nameGlow; persist(save); } else { adminToast = "Golden Name Glow unlocks with Oga Boss."; adminToastUntil = performance.now() + 2200; } }
         else if (p.x > 660 && p.y > 460 && p.y < 510) buyBundle();
+        else if (p.y > 500 && p.x < 640) { const packIndex = Math.floor((p.x - 60) / 145); if (packIndex >= 0 && packIndex < topUpPacks.length) beginTopUp(topUpPacks[packIndex]); }
         else if (p.y > 500) screen = "options";
       } else if (screen === "options" || screen === "credits") {
         if (screen === "options" && p.y > 155 && p.y < 225) cycleMusic();
@@ -522,9 +548,17 @@ export default function GameCanvas() {
         else if (adminMode && !onlineMode && p.y > 295 && p.y < 355) skipLevel();
         else if (p.y > (adminMode && !onlineMode ? 360 : 295) && p.y < (adminMode && !onlineMode ? 425 : 355)) goBack();
       } else if (screen === "dead") {
-        if (p.y > 420) resetLevel();
+        if (onlineMode && p.y > 340 && p.y < 400) screen = "spectator";
+        else if (p.y > 350 && p.y < 415) void shareWahala();
+        else if (p.y > 420) resetLevel();
+      } else if (screen === "spectator") {
+        if (p.y > 170 && p.y < 230) ghostTrigger("upnepa");
+        else if (p.y > 240 && p.y < 300) ghostTrigger("villagepeople");
+        else if (p.y > 310 && p.y < 370) ghostTrigger("godabeg");
+        else if (p.y > 420) leaveArena();
       } else if (screen === "clear") {
-        if (p.y > 360 || performance.now() > clearUntil) screen = "worlds";
+        if (p.y > 300 && p.y < 365) void shareWahala();
+        else if (p.y > 360 || performance.now() > clearUntil) screen = "worlds";
       }
     };
     const handlePointerUp = (event: PointerEvent) => {
@@ -561,6 +595,7 @@ export default function GameCanvas() {
       const gravity = now < gravityFlipUntil ? -1450 : 1450;
       player.vx += direction * 1700 * dt;
       player.vx *= player.grounded ? 0.82 : 0.93;
+      if (now < glueUntil) player.vx *= 0.15;
       player.vx = Math.max(-270, Math.min(270, player.vx));
       player.vy += gravity * dt;
       if (control.jump && (pressed.jump || demo) && (player.grounded || player.coyote > 0)) {
@@ -584,6 +619,9 @@ export default function GameCanvas() {
         if (hazard.kind === "falling") hazard.y = 155 + Math.abs(Math.sin(elapsed * 2 + (hazard.phase || 0))) * 125;
         if (hazard.kind === "axe") hazard.phase = (hazard.phase || 0) + dt * 4;
         if (hazard.kind === "movingWall") hazard.x = (hazard.originX ?? hazard.x) + Math.sin(elapsed * 1.4 + (hazard.phase || 0)) * 42;
+        if (hazard.kind === "boulder") hazard.x = (hazard.originX ?? hazard.x) - ((elapsed * 110 + (hazard.phase || 0) * 80) % 520);
+        if (hazard.kind === "shoker") hazard.h = 100 + Math.abs(Math.sin(elapsed * 2.6)) * 50;
+        if (hazard.kind === "mudSweep") hazard.y = 430 - Math.abs(Math.sin(elapsed * 1.8)) * 55;
         if (hazard.kind === "lateSpike" && standStill > 1.1) hazard.triggered = true;
         if (hazard.kind === "disappear" && rectsOverlap(player, hazard) && player.grounded) { hazard.triggered = true; }
         const box = hazard.kind === "axe" ? { x: hazard.x - 18, y: hazard.y, w: hazard.w + 36, h: hazard.h } : hazard;
@@ -593,7 +631,13 @@ export default function GameCanvas() {
         if (hazard.kind === "disappear" && hazard.triggered && rectsOverlap(player, { ...hazard, y: hazard.y - 4 })) die(hazard);
         if (hazard.kind === "lateSpike" && hazard.triggered && rectsOverlap(player, { ...hazard, y: hazard.y - 10 })) die(hazard);
         if (hazard.kind === "teleporter" && !hazard.triggered && rectsOverlap(player, box)) { hazard.triggered = true; player.x = Math.max(0, stage.exitX - 92); player.y = stage.spawn.y; music.blip(1040, 0.12); }
-        if (hazard.kind !== "reverse" && hazard.kind !== "blackout" && hazard.kind !== "gravityFlip" && hazard.kind !== "disappear" && hazard.kind !== "lateSpike" && hazard.kind !== "teleporter" && rectsOverlap(player, box)) die(hazard);
+        if (hazard.kind === "jumpPad" && rectsOverlap(player, box) && player.grounded) { player.vy = -820; player.grounded = false; music.blip(980, 0.08); }
+        if (hazard.kind === "glue" && rectsOverlap(player, box)) { glueUntil = now + 3000; save.debt += dt * 35; }
+        if (hazard.kind === "shoker" && rectsOverlap(player, box)) die(hazard);
+        if (hazard.kind === "fakeKey" && !hazard.triggered && rectsOverlap(player, box)) { hazard.triggered = true; stage.hazards.push({ kind: "lateSpike", x: hazard.x - 20, y: 410, w: 28, h: 26, penalty: 180, label: "GOD ABEG SPIKE" }, { kind: "lateSpike", x: hazard.x + 20, y: 410, w: 28, h: 26, penalty: 180, label: "GOD ABEG SPIKE" }, { kind: "lateSpike", x: hazard.x + 60, y: 410, w: 28, h: 26, penalty: 180, label: "GOD ABEG SPIKE" }); music.blip(130, 0.18); }
+        if (hazard.kind === "fakeCoin" && !hazard.triggered && rectsOverlap(player, box)) { hazard.triggered = true; save.debt += 2000; persist(save); adminToast = "Fake Coin Drop! ₦2,000 Gbese added."; adminToastUntil = now + 2200; }
+        if (hazard.kind === "mudSweep" && rectsOverlap(player, box)) { player.vy = -330; if (player.y > 390) die(hazard); }
+        if (hazard.kind !== "reverse" && hazard.kind !== "blackout" && hazard.kind !== "gravityFlip" && hazard.kind !== "disappear" && hazard.kind !== "lateSpike" && hazard.kind !== "teleporter" && hazard.kind !== "jumpPad" && hazard.kind !== "safetyTile" && hazard.kind !== "glue" && hazard.kind !== "shoker" && hazard.kind !== "fakeKey" && hazard.kind !== "fakeCoin" && hazard.kind !== "mudSweep" && rectsOverlap(player, box)) die(hazard);
       }
       if (onlineMode && arenaConnection) {
         for (const trap of arenaTraps) {
@@ -605,7 +649,7 @@ export default function GameCanvas() {
         networkAccumulator += dt;
         if (networkAccumulator >= 0.05) {
           networkAccumulator = 0;
-          arenaConnection.socket.emit("player_state", { x: player.x, y: player.y, direction: player.vx === 0 ? 0 : player.vx > 0 ? 1 : -1, jumping: !player.grounded, gbese: save.debt });
+          arenaConnection.socket.emit("player_state", { x: player.x, y: player.y, direction: player.vx === 0 ? 0 : player.vx > 0 ? 1 : -1, jumping: !player.grounded, gbese: save.debt, level: currentLevel + world * 10 });
         }
       }
       for (const key of stage.keys) {
@@ -613,7 +657,10 @@ export default function GameCanvas() {
           key.collected = true; save.keys += 1; save.keyIds.push(key.id); persist(save); music.blip(880, 0.12);
         }
       }
-      if (player.x > stage.exitX - 55 && player.x < stage.exitX + 55 && player.y > 395) clearLevel();
+      if (player.x > stage.exitX - 55 && player.x < stage.exitX + 55 && player.y + player.h > 300 && player.y < 385) {
+        if (!stage.keys[0]?.collected && !adminMode) { adminToast = "Key needed to Japa!"; adminToastUntil = now + 1500; music.blip(180, 0.12); player.x = Math.max(0, stage.exitX - 80); }
+        else clearLevel();
+      }
       if (player.y > H + 55) die({ penalty: 50, label: "DIRTY GROUND" });
       player.x = Math.max(0, Math.min(stage.width - player.w, player.x));
       cameraX += (Math.max(0, Math.min(stage.width - W, player.x - 275)) - cameraX) * Math.min(1, dt * 7);
@@ -643,7 +690,7 @@ export default function GameCanvas() {
       for (const key of stage.keys) {
         if (key.collected) continue;
         const bob = Math.sin(elapsed * 6 + key.x) * 3;
-        ctx.fillStyle = "#24aa5d"; ctx.fillRect(key.x - 7, key.y - 14 + bob, 14, 26); ctx.fillStyle = "#f8f2d9"; ctx.fillRect(key.x - 7, key.y - 5 + bob, 14, 7); ctx.fillStyle = "#ffffff"; ctx.fillRect(key.x - 2, key.y - 11 + bob, 5, 5); ctx.fillStyle = "#123d27"; ctx.fillRect(key.x + 3, key.y - 1 + bob, 4, 10);
+        ctx.fillStyle = "#123d2c"; ctx.fillRect(key.x - 8, key.y - 15 + bob, 16, 28); ctx.fillStyle = "#23a455"; ctx.fillRect(key.x - 6, key.y - 13 + bob, 12, 8); ctx.fillStyle = "#f8f2d9"; ctx.fillRect(key.x - 6, key.y - 5 + bob, 12, 7); ctx.fillStyle = "#23a455"; ctx.fillRect(key.x - 6, key.y + 2 + bob, 12, 9); ctx.fillStyle = "#f7e3a1"; ctx.fillRect(key.x - 2, key.y - 10 + bob, 5, 4); ctx.fillStyle = "#d6b95f"; ctx.fillRect(key.x + 1, key.y - 3 + bob, 3, 13); ctx.fillRect(key.x + 4, key.y + 7 + bob, 5, 3);
       }
       for (const hazard of stage.hazards) {
         const active = hazard.kind !== "lateSpike" || hazard.triggered;
@@ -674,10 +721,26 @@ export default function GameCanvas() {
           ctx.fillStyle = "#7ba961"; ctx.fillRect(hazard.x, hazard.y, hazard.w, hazard.h); ctx.fillStyle = "#f7e4a0"; ctx.fillRect(hazard.x + 12, hazard.y + 8, hazard.w - 24, 5); drawText(ctx, "AWOOF", hazard.x + hazard.w / 2, hazard.y + 26, 10, "#1c3022", "center", "DM Mono");
         } else if (hazard.kind === "teleporter") {
           ctx.fillStyle = "#5e42a1"; ctx.fillRect(hazard.x, hazard.y, hazard.w, hazard.h); ctx.fillStyle = "#cbb7ff"; ctx.fillRect(hazard.x + 8, hazard.y + 8, hazard.w - 16, hazard.h - 16); drawText(ctx, "JAPA", hazard.x + hazard.w / 2, hazard.y + hazard.h / 2, 10, "#28183f", "center", "DM Mono");
+        } else if (hazard.kind === "jumpPad") {
+          ctx.fillStyle = "#e0b94e"; ctx.fillRect(hazard.x, hazard.y, hazard.w, hazard.h); ctx.fillStyle = "#fff0a8"; ctx.fillRect(hazard.x + 8, hazard.y + 5, hazard.w - 16, 4); drawText(ctx, "AWOOF", hazard.x + hazard.w / 2, hazard.y + 15, 8, "#241c10", "center", "DM Mono");
+        } else if (hazard.kind === "safetyTile") {
+          ctx.fillStyle = "#79a8af"; ctx.fillRect(hazard.x, hazard.y, hazard.w, hazard.h); ctx.fillStyle = "#d9f2dc"; ctx.fillRect(hazard.x + 6, hazard.y + 4, hazard.w - 12, 3);
+        } else if (hazard.kind === "glue") {
+          ctx.fillStyle = "#6f9c5a"; ctx.fillRect(hazard.x, hazard.y, hazard.w, hazard.h); drawText(ctx, "GLUE", hazard.x + hazard.w / 2, hazard.y + 12, 8, "#f2e2a1", "center", "DM Mono");
+        } else if (hazard.kind === "boulder") {
+          ctx.fillStyle = "#5b5657"; ctx.beginPath(); ctx.arc(hazard.x + 15, hazard.y + 15, 15, 0, Math.PI * 2); ctx.fill(); ctx.fillStyle = "#a49383"; ctx.fillRect(hazard.x + 8, hazard.y + 7, 5, 4);
+        } else if (hazard.kind === "shoker") {
+          ctx.fillStyle = "#7b3037"; ctx.fillRect(hazard.x, hazard.y, hazard.w, hazard.h); ctx.fillStyle = "#f0c86b"; ctx.fillRect(hazard.x + 8, hazard.y + 12, hazard.w - 16, 5); drawText(ctx, "SHOKER", hazard.x + hazard.w / 2, hazard.y + 40, 9, "#251419", "center", "DM Mono");
+        } else if (hazard.kind === "fakeKey") {
+          ctx.fillStyle = "#cfb54d"; ctx.fillRect(hazard.x + 5, hazard.y + 10, 20, 8); ctx.fillRect(hazard.x + 20, hazard.y + 6, 6, 20); drawText(ctx, "?", hazard.x + 15, hazard.y + 8, 10, "#3d211b", "center", "DM Mono");
+        } else if (hazard.kind === "fakeCoin") {
+          ctx.fillStyle = "#e5b94f"; ctx.beginPath(); ctx.arc(hazard.x + 14, hazard.y + 14, 13, 0, Math.PI * 2); ctx.fill(); drawText(ctx, "₦", hazard.x + 14, hazard.y + 15, 13, "#4c2b17", "center", "DM Mono");
+        } else if (hazard.kind === "mudSweep") {
+          ctx.fillStyle = "#6a4938"; ctx.fillRect(hazard.x, hazard.y, hazard.w, hazard.h); ctx.fillStyle = "#a6754c"; for (let xx = hazard.x; xx < hazard.x + hazard.w; xx += 28) ctx.fillRect(xx + 4, hazard.y + 5, 15, 4); drawText(ctx, "MUD SWEEP", hazard.x + hazard.w / 2, hazard.y + 14, 9, "#f0c86b", "center", "DM Mono");
         }
       }
       // Exit door and route markers
-      ctx.fillStyle = "#123d2c"; ctx.fillRect(stage.exitX, 390, 58, 80); ctx.fillStyle = "#62d477"; ctx.fillRect(stage.exitX + 7, 397, 44, 73); ctx.fillStyle = "#dff6af"; ctx.fillRect(stage.exitX + 13, 406, 32, 51); ctx.fillStyle = "#1d4d34"; ctx.fillRect(stage.exitX + 37, 431, 4, 4); drawText(ctx, "JAPA", stage.exitX + 29, 382, 11, "#8ce49a", "center", "DM Mono");
+      ctx.fillStyle = "#123d2c"; ctx.fillRect(stage.exitX, 304, 58, 80); ctx.fillStyle = "#62d477"; ctx.fillRect(stage.exitX + 7, 311, 44, 73); ctx.fillStyle = "#dff6af"; ctx.fillRect(stage.exitX + 13, 320, 32, 51); ctx.fillStyle = "#1d4d34"; ctx.fillRect(stage.exitX + 37, 345, 4, 4); drawText(ctx, stage.keys[0]?.collected || adminMode ? "JAPA" : "LOCKED", stage.exitX + 29, 296, 10, stage.keys[0]?.collected || adminMode ? "#8ce49a" : "#f0c86b", "center", "DM Mono");
       // Player: detailed 32×32 pixel character, tinted only in shirt and shorts regions.
       const playerPose: "idle" | "run" | "jump" = !player.grounded ? "jump" : Math.abs(player.vx) > 40 ? "run" : "idle";
       drawPixelBoy(ctx, player.x - 8, player.y - 7, 1, save.wardrobe, save.wardrobe.username, playerPose, elapsed);
@@ -707,7 +770,7 @@ export default function GameCanvas() {
         drawText(ctx, "◀", 22 + leftWidth / 2, controlY + 33 * controlScale, 30 * controlScale, "#e8e2d6", "center", "DM Mono"); drawText(ctx, "▶", rightStart + rightWidth / 2, controlY + 33 * controlScale, 30 * controlScale, "#e8e2d6", "center", "DM Mono"); drawText(ctx, "JUMP", jumpStart + jumpWidth / 2, H - 72, 20 * controlScale, WORLD_COLORS[world], "center", "DM Mono");
         if (onlineMode) { const trapStart = 500 - (controlScale - 1) * 45; drawText(ctx, "DROP TRAP", trapStart + 110 * controlScale, H - 77, 16 * controlScale, "#e65c4b", "center", "DM Mono"); drawText(ctx, "SAPA · SPIKE · AWOOF", trapStart + 110 * controlScale, H - 48, 9 * controlScale, "#a5aaa1", "center", "DM Mono"); }
         drawText(ctx, "A / D or touch", 110, H - 18, 10, "#81877e", "center", "DM Mono"); drawText(ctx, "SPACE", 836, H - 18, 10, "#81877e", "center", "DM Mono");
-        if (onlineMode) { drawText(ctx, arenaNotice, 480, 82, 11, "#f0c86b", "center", "DM Mono"); leaderboard.slice(0, 4).forEach((entry, index) => drawText(ctx, `${index + 1}. ${entry.name}  ₦${entry.gbese}`, 780, 100 + index * 16, 10, index === 0 ? "#f0c86b" : "#a5aaa1", "left", "DM Mono")); }
+        if (onlineMode) { drawText(ctx, arenaNotice, 480, 82, 11, "#f0c86b", "center", "DM Mono"); leaderboard.slice(0, 10).forEach((entry, index) => drawText(ctx, `${index + 1}. ${entry.name}  L${entry.level || 1}  ₦${entry.gbese}`, 780, 100 + index * 16, 10, index === 0 ? "#f0c86b" : "#a5aaa1", "left", "DM Mono")); }
       }
     };
 
@@ -763,21 +826,22 @@ export default function GameCanvas() {
       const activeTab: "A" | "B" = wardrobeTab;
       const bottomBase = String(activeTab) === "B" ? 316 : 282;
       drawOverlay(); drawText(ctx, "FLEX WARDROBE", 60, 42, 30, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, `${save.wardrobe.username} · ${save.wardrobe.equippedGroup === "A" ? "MATTE LOADOUT" : "SOFT LIFE METALS"}`, 62, 72, 12, "#a8afa5", "left", "DM Mono");
-      drawButton(ctx, "STANDARD GEAR  //  FREE", 60, 92, 260, 42, activeTab === "A" ? "#72c67f" : "#58635d", true); drawButton(ctx, "SOFT LIFE METALS  //  PREMIUM", 330, 92, 300, 42, String(activeTab) === "B" ? "#f0c86b" : "#58635d", true);
+      drawButton(ctx, "LAPO PIKIN  //  FREE", 60, 92, 260, 42, activeTab === "A" ? "#72c67f" : "#58635d", true); drawButton(ctx, "NEPO BABY  //  PREMIUM", 330, 92, 300, 42, String(activeTab) === "B" ? "#f0c86b" : "#58635d", true);
       const items = wardrobeItems();
       const drawItem = (item: WardrobeItem, index: number, y: number) => { const x = 60 + (index % 4) * 145; const yy = y + Math.floor(index / 4) * 48; const unlocked = isUnlocked(item, save.wardrobe); const selected = item.id === save.wardrobe.topId || item.id === save.wardrobe.bottomId; ctx.fillStyle = selected ? "rgba(57,87,62,.95)" : "rgba(18,22,24,.95)"; ctx.fillRect(x, yy, 132, 39); ctx.strokeStyle = unlocked ? item.color : "#555d58"; ctx.strokeRect(x + 1, yy + 1, 130, 37); ctx.fillStyle = item.color; ctx.fillRect(x + 8, yy + 11, 16, 16); drawText(ctx, unlocked ? item.label.replace(" Shorts", "") : `₦${item.price}`, x + 31, yy + 13, 9, unlocked ? "#f7f1e6" : "#8b938b", "left", "DM Mono"); drawText(ctx, selected ? "EQUIPPED" : unlocked ? "EQUIP" : "UNLOCK", x + 31, yy + 28, 8, unlocked ? item.color : "#8b938b", "left", "DM Mono"); };
       drawText(ctx, "TOPS", 60, 148, 10, "#a4ada2", "left", "DM Mono"); items.tops.forEach((item, index) => drawItem(item, index, 158)); drawText(ctx, "BOTTOMS", 60, bottomBase - 10, 10, "#a4ada2", "left", "DM Mono"); items.bottoms.forEach((item, index) => drawItem(item, index, bottomBase));
       ctx.fillStyle = "rgba(19,22,24,.96)"; ctx.fillRect(675, 112, 225, 250); ctx.strokeStyle = String(activeTab) === "B" ? "#f0c86b" : "#72c67f"; ctx.strokeRect(676, 113, 223, 248); drawText(ctx, "LIVE FIT CHECK", 787, 136, 11, "#aeb6a9", "center", "DM Mono"); drawPixelBoy(ctx, 700, 165, 5, save.wardrobe); drawText(ctx, save.wardrobe.titleBadge ? `[${save.wardrobe.titleBadge}] ${save.wardrobe.username}` : save.wardrobe.username, 787, 300, 11, save.wardrobe.nameGlow ? "#ffe7a0" : "#f7f1e6", "center", "DM Mono");
-      drawButton(ctx, `TITLE BADGE  //  ${save.wardrobe.titleBadge || (save.wardrobe.titleBadgeUnlocked ? "NONE" : "₦200")}`, 675, 330, 225, 32, save.wardrobe.titleBadgeUnlocked ? "#72c67f" : "#f0c86b", true); drawButton(ctx, "EDIT GAMER USERNAME", 675, 375, 225, 38, "#72c67f", true); drawButton(ctx, `GOLDEN NAME GLOW  //  ${save.wardrobe.nameGlow ? "ON" : "OFF"}`, 675, 420, 225, 38, save.wardrobe.nameGlow ? "#f0c86b" : "#73858b", true); drawButton(ctx, save.wardrobe.bundleUnlocked ? "OGA BOSS BUNDLE  //  UNLOCKED" : "OGA BOSS BUNDLE  //  ₦2,000", 675, 465, 225, 38, "#b78cff", true); drawText(ctx, `GBESE AVAILABLE  ₦${save.debt.toLocaleString("en-NG")}`, 60, 485, 11, "#f3cc65", "left", "DM Mono"); drawButton(ctx, "BACK TO SETTINGS", 60, 505, 190, 28, "#73858b", true);
+      drawButton(ctx, `TITLE BADGE  //  ${save.wardrobe.titleBadge || (save.wardrobe.titleBadgeUnlocked ? "NONE" : "200 $GU")}`, 675, 330, 225, 32, save.wardrobe.titleBadgeUnlocked ? "#72c67f" : "#f0c86b", true); drawButton(ctx, "EDIT GAMER USERNAME", 675, 375, 225, 38, "#72c67f", true); drawButton(ctx, `GOLDEN NAME GLOW  //  ${save.wardrobe.nameGlow ? "ON" : "200 $GU"}`, 675, 420, 225, 38, save.wardrobe.nameGlow ? "#f0c86b" : "#73858b", true); drawButton(ctx, save.wardrobe.bundleUnlocked ? "OGA BOSS BUNDLE  //  UNLOCKED" : "OGA BOSS BUNDLE  //  2,000 $GU", 675, 465, 225, 38, "#b78cff", true); drawText(ctx, `GBESE  ₦${save.debt.toLocaleString("en-NG")}   $GU  ${save.gu}`, 60, 485, 11, "#f3cc65", "left", "DM Mono"); topUpPacks.forEach((pack, index) => drawButton(ctx, `${pack.label}  ₦${pack.naira}`, 60 + index * 145, 505, 135, 28, "#5c9dd1", true));
     };
     const drawCredits = () => { drawOverlay(); drawText(ctx, "PEOPLE WEY HELP BUILD THIS SHEGE", 74, 58, 26, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "A tiny arcade built with big wahala.", 76, 88, 12, "#8e978c", "left", "DM Mono"); drawText(ctx, "DESIGN", 80, 132, 11, "#72c67f", "left", "DM Mono"); drawText(ctx, "You + The Village People", 80, 153, 16, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "ENGINE", 80, 190, 11, "#c7a657", "left", "DM Mono"); drawText(ctx, "Canvas API · Vite · React · TypeScript", 80, 211, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Web Audio API · Express + Socket.io", 80, 231, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "MUSIC", 80, 270, 11, "#73858b", "left", "DM Mono"); drawText(ctx, "Chiptune + Fuji · Afro-Beats Rush", 80, 291, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Street-Pop Chaos", 80, 311, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Frantic Talking Drum Dept.", 80, 331, 12, "#a5aaa1", "left", "DM Mono"); drawText(ctx, "DEVELOPER", 80, 370, 11, "#e65c4b", "left", "DM Mono"); drawText(ctx, "Azamen (Alpha Collective Corporation)", 80, 394, 17, "#f7f1e6", "left", "Space Grotesk"); drawButton(ctx, "BACK TO MENU", 80, 454, 188, 42, "#73858b", true); };
     const drawPause = () => { drawOverlay(); drawText(ctx, "HOLD ON SMALL", W / 2, 95, 34, "#f7f1e6", "center", "Space Grotesk"); drawText(ctx, "the shege is still here when you return", W / 2, 130, 13, "#9aa297", "center", "DM Mono"); drawButton(ctx, "WE MOVE", 335, 170, 290, 48, WORLD_COLORS[world]); drawButton(ctx, "TRY THIS SHEGE AGAIN", 335, 235, 290, 48, "#c7a657"); if (adminMode && !onlineMode) drawButton(ctx, "SKIP LEVEL  //  ADMIN MODE", 335, 300, 290, 48, "#b78cff"); drawButton(ctx, "JAPA FROM THE GAME", 335, adminMode && !onlineMode ? 365 : 300, 290, 48, "#73858b"); if (adminMode && !onlineMode) drawText(ctx, "OFFLINE GOD MODE ENABLED", W / 2, 445, 11, "#b78cff", "center", "DM Mono"); };
-    const drawDead = () => { drawWorld(performance.now()); ctx.fillStyle = "rgba(71,20,26,.72)"; ctx.fillRect(0, 0, W, H); drawText(ctx, deathMessage, W / 2, 208, 26, "#fff0dc", "center", "Space Grotesk"); drawText(ctx, `GBESE +₦${deathPenalty}`, W / 2, 250, 18, "#ffbc6b", "center", "DM Mono"); drawText(ctx, "respawning in a blink...", W / 2, 300, 12, "#efb7a4", "center", "DM Mono"); };
-    const drawClear = () => { drawOverlay(); drawText(ctx, "LEVEL CLEAR", W / 2, 115, 38, "#72c67f", "center", "Space Grotesk"); drawText(ctx, clearMessage, W / 2, 168, 17, "#f7f1e6", "center", "Space Grotesk"); drawText(ctx, "PAYOUT  +₦2,000", W / 2, 238, 21, "#f3cc65", "center", "DM Mono"); drawText(ctx, `GBESE NOW  ₦${save.debt.toLocaleString("en-NG")}`, W / 2, 274, 14, "#a3aea1", "center", "DM Mono"); drawButton(ctx, "NEXT DOOR", 355, 355, 250, 50, WORLD_COLORS[world]); };
+    const drawDead = () => { drawWorld(performance.now()); ctx.fillStyle = "rgba(71,20,26,.72)"; ctx.fillRect(0, 0, W, H); drawText(ctx, deathMessage, W / 2, 208, 26, "#fff0dc", "center", "Space Grotesk"); drawText(ctx, `GBESE +₦${deathPenalty}`, W / 2, 250, 18, "#ffbc6b", "center", "DM Mono"); drawText(ctx, "respawning in a blink...", W / 2, 300, 12, "#efb7a4", "center", "DM Mono"); if (onlineMode) drawButton(ctx, "SPECTATOR GHOST POWERS", 335, 350, 290, 44, "#b78cff", true); drawButton(ctx, "SHARE YOUR WAHALA", 335, onlineMode ? 405 : 355, 290, 44, "#72c67f", true); };
+    const drawSpectator = () => { drawOverlay(); drawText(ctx, "GHOST MODE", W / 2, 75, 36, "#b78cff", "center", "Space Grotesk"); drawText(ctx, "you are eliminated — spend 100 Ghost Energy to cause minor wahala", W / 2, 112, 12, "#b9aeca", "center", "DM Mono"); drawText(ctx, `GHOST ENERGY  ${save.ghostEnergy}`, W / 2, 145, 16, "#f0c86b", "center", "DM Mono"); drawButton(ctx, "UP NEPA  ·  100 GHOST", 330, 175, 300, 44, "#f0c86b", true); drawButton(ctx, "VILLAGE PEOPLE  ·  100 GHOST", 330, 245, 300, 44, "#72c67f", true); drawButton(ctx, "GOD ABEG SPIKES  ·  100 GHOST", 330, 315, 300, 44, "#e65c4b", true); drawText(ctx, leaderboard.slice(0, 10).map((entry, index) => `${index + 1}. ${entry.name}  ₦${entry.gbese}`).join("   "), W / 2, 395, 10, "#d4d9d1", "center", "DM Mono"); drawButton(ctx, "JAPA FROM SPECTATOR", 330, 440, 300, 42, "#73858b", true); };
+    const drawClear = () => { drawOverlay(); drawText(ctx, "LEVEL CLEAR", W / 2, 115, 38, "#72c67f", "center", "Space Grotesk"); drawText(ctx, clearMessage, W / 2, 168, 17, "#f7f1e6", "center", "Space Grotesk"); drawText(ctx, "PAYOUT  +₦2,000", W / 2, 238, 21, "#f3cc65", "center", "DM Mono"); drawText(ctx, `GBESE NOW  ₦${save.debt.toLocaleString("en-NG")}`, W / 2, 274, 14, "#a3aea1", "center", "DM Mono"); drawButton(ctx, "SHARE YOUR WAHALA", 335, 310, 290, 44, "#72c67f", true); drawButton(ctx, "NEXT DOOR", 355, 380, 250, 50, WORLD_COLORS[world]); };
 
     const draw = (now: number) => {
       ctx.save(); ctx.setTransform(canvas.width / W, 0, 0, canvas.height / H, 0, 0); ctx.clearRect(0, 0, W, H);
-      if (screen === "title") drawTitle(); else if (screen === "worlds") drawWorlds(); else if (screen === "levels") drawLevels(); else if (screen === "wardrobe") drawWardrobe(); else if (screen === "arena") drawArena(); else if (screen === "options") drawOptions(); else if (screen === "credits") drawCredits(); else if (screen === "playing") drawWorld(now); else if (screen === "paused") { drawWorld(now); drawPause(); } else if (screen === "dead") drawDead(); else if (screen === "clear") drawClear();
+      if (screen === "title") drawTitle(); else if (screen === "worlds") drawWorlds(); else if (screen === "levels") drawLevels(); else if (screen === "wardrobe") drawWardrobe(); else if (screen === "arena") drawArena(); else if (screen === "options") drawOptions(); else if (screen === "credits") drawCredits(); else if (screen === "playing") drawWorld(now); else if (screen === "paused") { drawWorld(now); drawPause(); } else if (screen === "dead") drawDead(); else if (screen === "spectator") drawSpectator(); else if (screen === "clear") drawClear();
       if (clearMessage && now < clearUntil) { ctx.fillStyle = "rgba(18,37,28,.96)"; ctx.fillRect(160, 72, 640, 48); ctx.strokeStyle = "#72c67f"; ctx.lineWidth = 2; ctx.strokeRect(161, 73, 638, 46); drawText(ctx, clearMessage, W / 2, 96, 14, "#d8f6b4", "center", "DM Mono"); }
       if (adminToast && now < adminToastUntil) { ctx.fillStyle = "rgba(19,13,31,.96)"; ctx.fillRect(170, 24, 620, 48); ctx.strokeStyle = "#b78cff"; ctx.lineWidth = 2; ctx.strokeRect(171, 25, 618, 46); drawText(ctx, adminToast, W / 2, 48, 15, "#f0ddff", "center", "DM Mono"); }
       ctx.restore();
