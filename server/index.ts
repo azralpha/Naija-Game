@@ -113,6 +113,29 @@ async function startServer() {
     return res.json({ ok, roomId, command });
   });
 
+  app.post("/api/payments/verify", async (req, res) => {
+    const provider = req.body?.provider === "paystack" ? "paystack" : req.body?.provider === "flutterwave" ? "flutterwave" : "";
+    const reference = typeof req.body?.reference === "string" ? req.body.reference.trim() : "";
+    const amount = Number(req.body?.amount);
+    if (!provider || !reference || !Number.isFinite(amount) || amount <= 0) return res.status(400).json({ ok: false, error: "provider, reference, and amount are required" });
+    try {
+      if (provider === "paystack") {
+        if (!process.env.PAYSTACK_SECRET_KEY) return res.status(503).json({ ok: false, error: "Paystack verification is not configured" });
+        const response = await fetch(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, { headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` } });
+        const payload = await response.json() as { status?: boolean; data?: { status?: string; amount?: number; currency?: string; reference?: string } };
+        const verified = response.ok && payload.status === true && payload.data?.status === "success" && payload.data.currency === "NGN" && payload.data.amount === Math.round(amount * 100);
+        return res.status(verified ? 200 : 402).json({ ok: verified, provider, reference });
+      }
+      if (!process.env.FLUTTERWAVE_SECRET_KEY) return res.status(503).json({ ok: false, error: "Flutterwave verification is not configured" });
+      const response = await fetch(`https://api.flutterwave.com/v3/transactions/${encodeURIComponent(reference)}/verify`, { headers: { Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}` } });
+      const payload = await response.json() as { status?: string; data?: { status?: string; amount?: number; currency?: string; id?: number } };
+      const verified = response.ok && payload.status === "success" && payload.data?.status === "successful" && payload.data.currency === "NGN" && Number(payload.data.amount) >= amount;
+      return res.status(verified ? 200 : 402).json({ ok: verified, provider, reference });
+    } catch {
+      return res.status(502).json({ ok: false, error: "Payment verification provider unavailable" });
+    }
+  });
+
   app.post("/api/streamer/connect", async (req, res) => {
     const roomId = typeof req.body?.roomId === "string" ? req.body.roomId.trim() : "";
     const videoId = typeof req.body?.videoId === "string" ? req.body.videoId.trim() : undefined;

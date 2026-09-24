@@ -4,6 +4,7 @@ import { getLevel, type WorldIndex } from "../game/levelData";
 import { DEFAULT_WARDROBE, GROUP_A_BOTTOMS, GROUP_A_TOPS, GROUP_B_BOTTOMS, GROUP_B_TOPS, equipItem, isUnlocked, itemById, type WardrobeItem } from "../game/wardrobe";
 
 type Screen = "title" | "worlds" | "levels" | "wardrobe" | "arena" | "options" | "credits" | "playing" | "paused" | "dead" | "spectator" | "clear";
+type PaymentProvider = "flutterwave" | "paystack";
 type Platform = { x: number; y: number; w: number; h: number; vanish?: boolean; color?: string };
 type HazardKind =
   | "spike"
@@ -113,6 +114,14 @@ function loadSettings() {
 
 function persistSettings(settings: { musicTrack: number; controlScale: number }) {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+}
+
+function loadPaymentProvider(): PaymentProvider {
+  return localStorage.getItem("nnl-payment-provider") === "paystack" ? "paystack" : "flutterwave";
+}
+
+function persistPaymentProvider(provider: PaymentProvider) {
+  localStorage.setItem("nnl-payment-provider", provider);
 }
 
 function rectsOverlap(a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }) {
@@ -288,6 +297,7 @@ export default function GameCanvas() {
     let adminToast = "";
     let adminToastUntil = 0;
     let wardrobeTab: "A" | "B" = query.has("metals") ? "B" : "A";
+    let paymentProvider: PaymentProvider = loadPaymentProvider();
     let demo = query.has("demo");
     const titleTapTimes: number[] = [];
     if (!demo && !query.has("wardrobe") && (!localStorage.getItem(STORAGE_KEY) || !localStorage.getItem(STORAGE_KEY)?.includes('"wardrobe"'))) {
@@ -369,11 +379,23 @@ export default function GameCanvas() {
       save.wardrobe.bundleUnlocked = true; save.wardrobe.nameGlow = true; save.wardrobe.titleBadgeUnlocked = true; save.wardrobe.unlockedB = [...GROUP_B_TOPS, ...GROUP_B_BOTTOMS].map((item) => item.id); persist(save); music.blip(1320, 0.2);
     };
     const topUpPacks = [{ label: "SAPA RELIEF", naira: 300, gu: 350 }, { label: "WORKING MAN", naira: 500, gu: 650 }, { label: "OGA BOSS", naira: 1000, gu: 1500 }, { label: "CHAIRMAN", naira: 2000, gu: 3200 }];
+    const cyclePaymentProvider = () => { paymentProvider = paymentProvider === "flutterwave" ? "paystack" : "flutterwave"; persistPaymentProvider(paymentProvider); adminToast = `Payment provider: ${paymentProvider === "flutterwave" ? "Flutterwave" : "Paystack"}`; adminToastUntil = performance.now() + 1800; };
     const beginTopUp = (pack: typeof topUpPacks[number]) => {
-      const checkout = (window as Window & { FlutterwaveCheckout?: (config: Record<string, unknown>) => void }).FlutterwaveCheckout;
-      const publicKey = (import.meta as ImportMeta & { env?: Record<string, string> }).env?.VITE_FLUTTERWAVE_PUBLIC_KEY || "FLWPUBK_TEST-configure-me";
-      if (!checkout || publicKey === "FLWPUBK_TEST-configure-me") { adminToast = "Flutterwave checkout is ready — configure VITE_FLUTTERWAVE_PUBLIC_KEY."; adminToastUntil = performance.now() + 2800; return; }
-      checkout({ public_key: publicKey, tx_ref: `nnl-${Date.now()}`, amount: pack.naira, currency: "NGN", payment_options: "card,banktransfer,ussd", customer: { email: `${save.wardrobe.username.replace(/\s+/g, ".").toLowerCase()}@nnl.game`, name: save.wardrobe.username }, customizations: { title: pack.label, description: `${pack.gu} $GU top-up for Naija Normal Level` }, callback: (response: { status?: string }) => { if (response.status === "successful") { save.gu += pack.gu; save.hasToppedUp = true; persist(save); adminToast = `Top-up complete: +${pack.gu} $GU`; adminToastUntil = performance.now() + 2200; } }, onclose: () => undefined });
+      const env = (import.meta as ImportMeta & { env?: Record<string, string> }).env || {};
+      const email = `${save.wardrobe.username.replace(/\s+/g, ".").toLowerCase()}@nnl.game`;
+      const reference = `nnl-${paymentProvider}-${Date.now()}`;
+      const credit = async (reference: string) => { try { const response = await fetch("/api/payments/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: paymentProvider, reference, amount: pack.naira }) }); const result = await response.json() as { ok?: boolean }; if (!response.ok || !result.ok) throw new Error("Payment verification failed"); save.gu += pack.gu; save.hasToppedUp = true; persist(save); adminToast = `Top-up complete: +${pack.gu} $GU via ${paymentProvider === "flutterwave" ? "Flutterwave" : "Paystack"}`; adminToastUntil = performance.now() + 2200; } catch { adminToast = "Payment received — verification is still pending. Your $GU will arrive after confirmation."; adminToastUntil = performance.now() + 3000; } };
+      if (paymentProvider === "flutterwave") {
+        const checkout = (window as Window & { FlutterwaveCheckout?: (config: Record<string, unknown>) => void }).FlutterwaveCheckout;
+        const publicKey = env.VITE_FLUTTERWAVE_PUBLIC_KEY;
+        if (!checkout || !publicKey) { adminToast = "Flutterwave is not configured yet."; adminToastUntil = performance.now() + 2200; return; }
+        checkout({ public_key: publicKey, tx_ref: reference, amount: pack.naira, currency: "NGN", payment_options: "card,banktransfer,ussd", customer: { email, name: save.wardrobe.username }, customizations: { title: pack.label, description: `${pack.gu} $GU top-up for Naija Normal Level` }, callback: (response: { status?: string; transaction_id?: number }) => { if (response.status === "successful" && response.transaction_id) void credit(String(response.transaction_id)); }, onclose: () => undefined });
+        return;
+      }
+      const paystack = (window as Window & { PaystackPop?: { setup: (config: Record<string, unknown>) => { openIframe: () => void } } }).PaystackPop;
+      const publicKey = env.VITE_PAYSTACK_PUBLIC_KEY;
+      if (!paystack || !publicKey) { adminToast = "Paystack is not configured yet."; adminToastUntil = performance.now() + 2200; return; }
+      paystack.setup({ key: publicKey, email, amount: pack.naira * 100, currency: "NGN", ref: reference, metadata: { custom_fields: [{ display_name: "GU Pack", variable_name: "gu_pack", value: String(pack.gu) }] }, callback: (response: { status?: string; reference?: string }) => { if (response.status === "success" && response.reference) void credit(response.reference); }, onClose: () => undefined }).openIframe();
     };
     const cycleBadge = () => {
       if (!save.wardrobe.titleBadgeUnlocked && !save.wardrobe.bundleUnlocked && !adminMode) {
@@ -533,7 +555,8 @@ export default function GameCanvas() {
         else if (p.x > 660 && p.y > 325 && p.y < 365) cycleBadge();
         else if (p.x > 660 && p.y > 365 && p.y < 415) editUsername();
         else if (p.x > 660 && p.y > 415 && p.y < 465) { if (save.wardrobe.bundleUnlocked || adminMode) { save.wardrobe.nameGlow = !save.wardrobe.nameGlow; persist(save); } else { adminToast = "Golden Name Glow unlocks with Oga Boss."; adminToastUntil = performance.now() + 2200; } }
-        else if (p.x > 660 && p.y > 460 && p.y < 510) buyBundle();
+        else if (p.x > 660 && p.y > 460 && p.y < 500) buyBundle();
+        else if (p.x > 660 && p.y >= 500) cyclePaymentProvider();
         else if (p.y > 500 && p.x < 640) { const packIndex = Math.floor((p.x - 60) / 145); if (packIndex >= 0 && packIndex < topUpPacks.length) beginTopUp(topUpPacks[packIndex]); }
         else if (p.y > 500) screen = "options";
       } else if (screen === "options" || screen === "credits") {
@@ -831,7 +854,7 @@ export default function GameCanvas() {
       const drawItem = (item: WardrobeItem, index: number, y: number) => { const x = 60 + (index % 4) * 145; const yy = y + Math.floor(index / 4) * 48; const unlocked = isUnlocked(item, save.wardrobe); const selected = item.id === save.wardrobe.topId || item.id === save.wardrobe.bottomId; ctx.fillStyle = selected ? "rgba(57,87,62,.95)" : "rgba(18,22,24,.95)"; ctx.fillRect(x, yy, 132, 39); ctx.strokeStyle = unlocked ? item.color : "#555d58"; ctx.strokeRect(x + 1, yy + 1, 130, 37); ctx.fillStyle = item.color; ctx.fillRect(x + 8, yy + 11, 16, 16); drawText(ctx, unlocked ? item.label.replace(" Shorts", "") : `₦${item.price}`, x + 31, yy + 13, 9, unlocked ? "#f7f1e6" : "#8b938b", "left", "DM Mono"); drawText(ctx, selected ? "EQUIPPED" : unlocked ? "EQUIP" : "UNLOCK", x + 31, yy + 28, 8, unlocked ? item.color : "#8b938b", "left", "DM Mono"); };
       drawText(ctx, "TOPS", 60, 148, 10, "#a4ada2", "left", "DM Mono"); items.tops.forEach((item, index) => drawItem(item, index, 158)); drawText(ctx, "BOTTOMS", 60, bottomBase - 10, 10, "#a4ada2", "left", "DM Mono"); items.bottoms.forEach((item, index) => drawItem(item, index, bottomBase));
       ctx.fillStyle = "rgba(19,22,24,.96)"; ctx.fillRect(675, 112, 225, 250); ctx.strokeStyle = String(activeTab) === "B" ? "#f0c86b" : "#72c67f"; ctx.strokeRect(676, 113, 223, 248); drawText(ctx, "LIVE FIT CHECK", 787, 136, 11, "#aeb6a9", "center", "DM Mono"); drawPixelBoy(ctx, 700, 165, 5, save.wardrobe); drawText(ctx, save.wardrobe.titleBadge ? `[${save.wardrobe.titleBadge}] ${save.wardrobe.username}` : save.wardrobe.username, 787, 300, 11, save.wardrobe.nameGlow ? "#ffe7a0" : "#f7f1e6", "center", "DM Mono");
-      drawButton(ctx, `TITLE BADGE  //  ${save.wardrobe.titleBadge || (save.wardrobe.titleBadgeUnlocked ? "NONE" : "200 $GU")}`, 675, 330, 225, 32, save.wardrobe.titleBadgeUnlocked ? "#72c67f" : "#f0c86b", true); drawButton(ctx, "EDIT GAMER USERNAME", 675, 375, 225, 38, "#72c67f", true); drawButton(ctx, `GOLDEN NAME GLOW  //  ${save.wardrobe.nameGlow ? "ON" : "200 $GU"}`, 675, 420, 225, 38, save.wardrobe.nameGlow ? "#f0c86b" : "#73858b", true); drawButton(ctx, save.wardrobe.bundleUnlocked ? "OGA BOSS BUNDLE  //  UNLOCKED" : "OGA BOSS BUNDLE  //  2,000 $GU", 675, 465, 225, 38, "#b78cff", true); drawText(ctx, `GBESE  ₦${save.debt.toLocaleString("en-NG")}   $GU  ${save.gu}`, 60, 485, 11, "#f3cc65", "left", "DM Mono"); topUpPacks.forEach((pack, index) => drawButton(ctx, `${pack.label}  ₦${pack.naira}`, 60 + index * 145, 505, 135, 28, "#5c9dd1", true));
+      drawButton(ctx, `TITLE BADGE  //  ${save.wardrobe.titleBadge || (save.wardrobe.titleBadgeUnlocked ? "NONE" : "200 $GU")}`, 675, 330, 225, 32, save.wardrobe.titleBadgeUnlocked ? "#72c67f" : "#f0c86b", true); drawButton(ctx, "EDIT GAMER USERNAME", 675, 375, 225, 38, "#72c67f", true); drawButton(ctx, `GOLDEN NAME GLOW  //  ${save.wardrobe.nameGlow ? "ON" : "200 $GU"}`, 675, 420, 225, 38, save.wardrobe.nameGlow ? "#f0c86b" : "#73858b", true); drawButton(ctx, save.wardrobe.bundleUnlocked ? "OGA BOSS BUNDLE  //  UNLOCKED" : "OGA BOSS BUNDLE  //  2,000 $GU", 675, 465, 225, 38, "#b78cff", true); drawButton(ctx, `PAY WITH  //  ${paymentProvider === "flutterwave" ? "FLUTTERWAVE" : "PAYSTACK"}`, 675, 505, 225, 28, paymentProvider === "flutterwave" ? "#f0c86b" : "#42b883", true); drawText(ctx, `GBESE  ₦${save.debt.toLocaleString("en-NG")}   $GU  ${save.gu}`, 60, 485, 11, "#f3cc65", "left", "DM Mono"); topUpPacks.forEach((pack, index) => drawButton(ctx, `${pack.label}  ₦${pack.naira}`, 60 + index * 145, 505, 135, 28, "#5c9dd1", true));
     };
     const drawCredits = () => { drawOverlay(); drawText(ctx, "PEOPLE WEY HELP BUILD THIS SHEGE", 74, 58, 26, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "A tiny arcade built with big wahala.", 76, 88, 12, "#8e978c", "left", "DM Mono"); drawText(ctx, "DESIGN", 80, 132, 11, "#72c67f", "left", "DM Mono"); drawText(ctx, "You + The Village People", 80, 153, 16, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "ENGINE", 80, 190, 11, "#c7a657", "left", "DM Mono"); drawText(ctx, "Canvas API · Vite · React · TypeScript", 80, 211, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Web Audio API · Express + Socket.io", 80, 231, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "MUSIC", 80, 270, 11, "#73858b", "left", "DM Mono"); drawText(ctx, "Chiptune + Fuji · Afro-Beats Rush", 80, 291, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Street-Pop Chaos", 80, 311, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Frantic Talking Drum Dept.", 80, 331, 12, "#a5aaa1", "left", "DM Mono"); drawText(ctx, "DEVELOPER", 80, 370, 11, "#e65c4b", "left", "DM Mono"); drawText(ctx, "Azamen (Alpha Collective Corporation)", 80, 394, 17, "#f7f1e6", "left", "Space Grotesk"); drawButton(ctx, "BACK TO MENU", 80, 454, 188, 42, "#73858b", true); };
     const drawPause = () => { drawOverlay(); drawText(ctx, "HOLD ON SMALL", W / 2, 95, 34, "#f7f1e6", "center", "Space Grotesk"); drawText(ctx, "the shege is still here when you return", W / 2, 130, 13, "#9aa297", "center", "DM Mono"); drawButton(ctx, "WE MOVE", 335, 170, 290, 48, WORLD_COLORS[world]); drawButton(ctx, "TRY THIS SHEGE AGAIN", 335, 235, 290, 48, "#c7a657"); if (adminMode && !onlineMode) drawButton(ctx, "SKIP LEVEL  //  ADMIN MODE", 335, 300, 290, 48, "#b78cff"); drawButton(ctx, "JAPA FROM THE GAME", 335, adminMode && !onlineMode ? 365 : 300, 290, 48, "#73858b"); if (adminMode && !onlineMode) drawText(ctx, "OFFLINE GOD MODE ENABLED", W / 2, 445, 11, "#b78cff", "center", "DM Mono"); };
