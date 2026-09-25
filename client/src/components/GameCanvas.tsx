@@ -1,9 +1,9 @@
 import { useEffect, useRef } from "react";
 import { connectArena, type ArenaConnection, type ArenaLeaderboardEntry, type ArenaTrap, type RemotePlayer, type StreamerEvent } from "../game/online";
-import { getLevel, type WorldIndex } from "../game/levelData";
+import { getLevel, type RageMechanic, type WorldIndex } from "../game/levelData";
 import { DEFAULT_WARDROBE, GROUP_A_BOTTOMS, GROUP_A_TOPS, GROUP_B_BOTTOMS, GROUP_B_TOPS, equipItem, isUnlocked, itemById, type WardrobeItem } from "../game/wardrobe";
 
-type Screen = "title" | "worlds" | "levels" | "wardrobe" | "arena" | "options" | "credits" | "playing" | "paused" | "dead" | "spectator" | "clear";
+type Screen = "title" | "worlds" | "levels" | "wardrobe" | "wallet" | "arena" | "options" | "credits" | "playing" | "paused" | "dead" | "spectator" | "clear";
 type PaymentProvider = "flutterwave" | "paystack";
 type Platform = { x: number; y: number; w: number; h: number; vanish?: boolean; color?: string };
 type HazardKind =
@@ -47,6 +47,7 @@ type KeyPickup = { id: string; x: number; y: number; collected: boolean };
 type SaveData = { debt: number; gu: number; ghostEnergy: number; hasToppedUp: boolean; keys: number; unlocked: number; keyIds: string[]; adminMode: boolean; progress: number[]; wardrobe: typeof DEFAULT_WARDROBE };
 type Stage = {
   world: WorldIndex;
+  mechanic: RageMechanic;
   width: number;
   platforms: Platform[];
   hazards: Hazard[];
@@ -132,10 +133,12 @@ function stageFor(world: WorldIndex, level: number, save: SaveData): Stage {
   const definition = getLevel(world, level);
   const keys: KeyPickup[] = [{ id: `${world}-${level}-a`, x: 390, y: 350, collected: false }];
   keys.forEach((key) => { key.collected = save.keyIds.includes(key.id); });
+  const floorPlatforms = definition.mechanic === "fake-solid-floor" ? [{ x: 0, y: 432, w: 860, h: 24, color: "#4f413c" }, { x: 1180, y: 432, w: definition.width - 1180, h: 24, color: "#4f413c" }] : [{ x: 0, y: 432, w: definition.width, h: 24, color: "#4f413c" }];
   return {
     world,
+    mechanic: definition.mechanic,
     width: definition.width,
-    platforms: definition.platforms,
+    platforms: [...definition.platforms, ...floorPlatforms],
     hazards: definition.hazards.map((hazard) => ({ ...hazard, originX: hazard.x })) as Hazard[],
     keys,
     exitX: definition.exitX,
@@ -144,7 +147,7 @@ function stageFor(world: WorldIndex, level: number, save: SaveData): Stage {
 }
 
 function createPlayer(stage: Stage): Player {
-  return { x: stage.spawn.x, y: stage.spawn.y, w: 16, h: 25, vx: 0, vy: 0, grounded: false, coyote: 0 };
+  return { x: stage.spawn.x, y: stage.spawn.y, w: 32, h: 33, vx: 0, vy: 0, grounded: false, coyote: 0 };
 }
 
 class MusicBox {
@@ -252,6 +255,7 @@ function drawPixelBoy(ctx: CanvasRenderingContext2D, x: number, y: number, scale
   const run = pose === "run"; const jump = pose === "jump"; const swing = run ? (Math.sin(phase * 11) > 0 ? 1 : -1) : 0;
   const armFront = jump ? -4 : swing * 3; const armBack = jump ? -2 : -swing * 2; const legFront = jump ? -3 : swing * 2; const legBack = jump ? 2 : -swing * 2;
   ctx.save(); ctx.imageSmoothingEnabled = false;
+  if (top.group === "B" || bottom.group === "B") { ctx.shadowColor = top.group === "B" ? top.color : bottom.color; ctx.shadowBlur = 8 * scale; ctx.globalAlpha = 0.3; px(3, 4, 26, 28, top.color); ctx.globalAlpha = 1; ctx.shadowBlur = 0; for (let i = 0; i < 5; i += 1) px(3 + ((phase * 9 + i * 7) % 26), 4 + ((phase * 5 + i * 11) % 25), 1, 1, i % 2 ? "#fff0a8" : top.color); }
   // 32×32 constant grayscale/base character: afro, profile face, eye, ear and nose.
   px(9, 2, 13, 2, hair); px(6, 5, 20, 4, hair); px(5, 8, 22, 3, hair); px(8, 3, 4, 2, hairLight); px(15, 2, 4, 2, hairLight); px(22, 5, 5, 3, hairLight); px(4, 7, 3, 3, hairLight);
   px(9, 10, 16, 7, skin); px(11, 9, 12, 2, skinLight); px(8, 11, 3, 4, skinShadow); px(25, 12, 3, 2, skinLight); px(26, 14, 2, 2, skinShadow); // ear + profile nose
@@ -281,7 +285,7 @@ export default function GameCanvas() {
     canvas.width = W; canvas.height = H; ctx.imageSmoothingEnabled = false;
 
     const query = new URLSearchParams(window.location.search);
-    let screen: Screen = query.has("demo") ? "playing" : query.has("wardrobe") ? "wardrobe" : "title";
+    let screen: Screen = query.has("demo") ? "playing" : query.has("wardrobe") ? "wardrobe" : query.has("wallet") ? "wallet" : query.has("credits") ? "credits" : "title";
     let onlineMode = false;
     let arenaConnection: ArenaConnection | null = null;
     let remotePlayers: RemotePlayer[] = [];
@@ -321,6 +325,10 @@ export default function GameCanvas() {
     let fakeJumpUntil = 0;
     let gravityFlipUntil = 0;
     let glueUntil = 0;
+    let fakeGameOverUntil = 0;
+    let doorLockedByBetrayal = false;
+    let jumpDelayUntil = 0;
+    let shiftingRespawn = 0;
     let shake = 0;
     let standStill = 0;
     let demoTime = 0;
@@ -520,7 +528,7 @@ export default function GameCanvas() {
       event.preventDefault(); music.start();
       const p = canvasPoint(event);
       if (screen === "playing") {
-        if (p.y > H - 135) {
+        if (p.y > 432) {
           const leftWidth = 175 * controlScale; const rightStart = 212 - (controlScale - 1) * 50; const rightEnd = rightStart + 175 * controlScale;
           const trapStart = 500 - (controlScale - 1) * 45; const trapEnd = 720 + (controlScale - 1) * 45; const jumpStart = 744 - (controlScale - 1) * 40;
           if (p.x < 22 + leftWidth) touch.left = true; else if (p.x > rightStart && p.x < rightEnd) touch.right = true; else if (onlineMode && p.x > trapStart && p.x < trapEnd) placeTrap(); else if (p.x > jumpStart) { touch.jump = true; pressed.jump = true; }
@@ -549,7 +557,8 @@ export default function GameCanvas() {
             if (column >= 0 && column < 5 && (adminMode || selectedLevel <= (save.progress[world] || 0))) startGame(world, selectedLevel);
           } else if (p.y > 430) screen = "worlds";
       } else if (screen === "wardrobe") {
-        if (p.y > 90 && p.y < 140) { wardrobeTab = p.x < 325 ? "A" : "B"; }
+        if (p.x > 660 && p.y < 92) screen = "title";
+        else if (p.y > 90 && p.y < 140) { wardrobeTab = p.x < 325 ? "A" : "B"; }
         else if (p.x < 650 && p.y >= 150 && p.y < 265) { const index = Math.floor((p.x - 60) / 145) + Math.floor((p.y - 158) / 48) * 4; const items = wardrobeItems(); if (index >= 0 && index < items.tops.length) chooseWardrobeItem(items.tops[index]); }
         else if (p.x < 650 && p.y >= (wardrobeTab === "B" ? 315 : 275) && p.y < (wardrobeTab === "B" ? 485 : 385)) { const bottomBase = wardrobeTab === "B" ? 316 : 282; const index = Math.floor((p.x - 60) / 145) + Math.floor((p.y - bottomBase) / 48) * 4; const items = wardrobeItems(); if (index >= 0 && index < items.bottoms.length) chooseWardrobeItem(items.bottoms[index]); }
         else if (p.x > 660 && p.y > 325 && p.y < 365) cycleBadge();
@@ -559,11 +568,17 @@ export default function GameCanvas() {
         else if (p.x > 660 && p.y >= 500) cyclePaymentProvider();
         else if (p.y > 500 && p.x < 640) { const packIndex = Math.floor((p.x - 60) / 145); if (packIndex >= 0 && packIndex < topUpPacks.length) beginTopUp(topUpPacks[packIndex]); }
         else if (p.y > 500) screen = "options";
+      } else if (screen === "wallet") {
+        if (p.y > 120 && p.y < 175 && p.x > 620) cyclePaymentProvider();
+        else if (p.y > 185 && p.y < 250 && p.x < 640) { const packIndex = Math.floor((p.x - 60) / 145); if (packIndex >= 0 && packIndex < topUpPacks.length) beginTopUp(topUpPacks[packIndex]); }
+        else if (p.y > 270 && p.y < 335) buyBundle();
+        else if (p.y > 430) screen = "title";
       } else if (screen === "options" || screen === "credits") {
         if (screen === "options" && p.y > 155 && p.y < 225) cycleMusic();
         else if (screen === "options" && p.y > 225 && p.y < 295) cycleControls();
         else if (screen === "options" && p.y > 295 && p.y < 370) void configureStreamer();
-        else if (screen === "options" && p.y > 370 && p.y < 435) screen = "wardrobe";
+        else if (screen === "options" && p.y > 370 && p.y < 425) screen = "wardrobe";
+        else if (screen === "options" && p.y > 425 && p.y < 470) screen = "wallet";
         else if (p.y > 440) screen = "title";
       } else if (screen === "paused") {
         if (p.y > 165 && p.y < 225) screen = "playing";
@@ -610,6 +625,7 @@ export default function GameCanvas() {
       if (screen === "dead") { if (now > deathUntil) resetLevel(); return; }
       if (screen !== "playing") return;
       const control = input();
+      if (stage.mechanic === "permanent-reverse" || stage.mechanic === "reverse-clone" || stage.mechanic === "gauntlet") reverseUntil = Math.max(reverseUntil, now + 80);
       const reverse = now < reverseUntil;
       const left = reverse ? control.right : control.left;
       const right = reverse ? control.left : control.right;
@@ -617,11 +633,14 @@ export default function GameCanvas() {
       if (direction === 0) standStill += dt; else standStill = 0;
       const gravity = now < gravityFlipUntil ? -1450 : 1450;
       player.vx += direction * 1700 * dt;
-      player.vx *= player.grounded ? 0.82 : 0.93;
+      player.vx *= stage.mechanic === "zero-friction" ? 0.998 : player.grounded ? 0.82 : 0.93;
+      if (stage.mechanic === "backwind" && !player.grounded) player.vx -= 240 * dt;
       if (now < glueUntil) player.vx *= 0.15;
       player.vx = Math.max(-270, Math.min(270, player.vx));
       player.vy += gravity * dt;
-      if (control.jump && (pressed.jump || demo) && (player.grounded || player.coyote > 0)) {
+      if (stage.mechanic === "delayed-jump" && pressed.jump) jumpDelayUntil = now + 300;
+      const jumpPressed = stage.mechanic === "delayed-jump" ? now >= jumpDelayUntil && control.jump : control.jump;
+      if (jumpPressed && (pressed.jump || demo || stage.mechanic === "delayed-jump") && (player.grounded || player.coyote > 0)) {
         if (now < fakeJumpUntil) { music.blip(150, 0.08); } else { player.vy = gravity > 0 ? -570 : 570; player.grounded = false; player.coyote = 0; music.blip(660, 0.06); }
       }
       pressed.jump = false;
@@ -633,6 +652,11 @@ export default function GameCanvas() {
         if (disappearing) continue;
         if (player.vy >= 0 && prevBottom <= platform.y + 6 && player.y + player.h >= platform.y && player.x + player.w > platform.x && player.x < platform.x + platform.w) {
           player.y = platform.y - player.h; player.vy = 0; player.grounded = true; player.coyote = 0.09;
+          if (stage.mechanic === "sinking-ledges" && platform.y < 432) platform.y += Math.min(170, dt * 1700);
+          if (stage.mechanic === "fade-platform" && platform.y < 432) platform.w = -1;
+          if (stage.mechanic === "shrinking-platforms" && platform.y < 432) platform.w *= 0.8;
+          if (stage.mechanic === "elastic-ground" && platform.y >= 432) player.vy = -1180;
+          if (stage.mechanic === "landing-spikes" && platform.y >= 432 && !stage.hazards.some((h) => h.kind === "lateSpike" && Math.abs(h.x - player.x) < 50)) stage.hazards.push({ kind: "lateSpike", x: player.x, y: 408, w: 62, h: 24, penalty: 180, label: "LANDING SPIKES", triggered: true });
         }
         if (player.vy < 0 && player.y <= platform.y + platform.h && player.y + player.h > platform.y + platform.h && player.x + player.w > platform.x && player.x < platform.x + platform.w) {
           player.y = platform.y + platform.h; player.vy = 0;
@@ -662,6 +686,13 @@ export default function GameCanvas() {
         if (hazard.kind === "mudSweep" && rectsOverlap(player, box)) { player.vy = -330; if (player.y > 390) die(hazard); }
         if (hazard.kind !== "reverse" && hazard.kind !== "blackout" && hazard.kind !== "gravityFlip" && hazard.kind !== "disappear" && hazard.kind !== "lateSpike" && hazard.kind !== "teleporter" && hazard.kind !== "jumpPad" && hazard.kind !== "safetyTile" && hazard.kind !== "glue" && hazard.kind !== "shoker" && hazard.kind !== "fakeKey" && hazard.kind !== "fakeCoin" && hazard.kind !== "mudSweep" && rectsOverlap(player, box)) die(hazard);
       }
+      if (stage.mechanic === "glue-lock" && player.grounded && player.x > 980 && player.x < 1200) { player.vx = 0; if (elapsed % 1.2 < dt) stage.hazards.push({ kind: "lateSpike", x: player.x + 220, y: 408, w: 64, h: 24, penalty: 220, label: "LOCKED-IN SPIKES", triggered: true }); }
+      if (stage.mechanic === "door-teleport-left" && player.x > stage.exitX - 100) { player.x = 80; cameraX = 0; adminToast = "The JAPA door don run go front."; adminToastUntil = now + 1400; }
+      if (stage.mechanic === "door-floor-drop" && player.x > stage.exitX - 180) stage.platforms.filter((platform) => platform.y >= 432 && platform.x > stage.exitX - 140 && platform.x < stage.exitX + 100).forEach((platform) => { platform.y = 520; });
+      if ((stage.mechanic === "air-ui-blackout" || stage.mechanic === "jump-blackout") && !player.grounded && control.jump) blackoutUntil = now + 1500;
+      if (stage.mechanic === "fake-game-over" && player.x > 1250 && player.x < 1400) fakeGameOverUntil = now + 900;
+      if (stage.mechanic === "invisible-wall" && player.x > 1450 && player.x < 1490 && player.y < 360) { player.vx = 0; if (player.grounded) die({ penalty: 220, label: "INVISIBLE WALL" }); }
+      if (stage.mechanic === "spike-wall-timer" && elapsed > 5 && player.x < elapsed * 90 - 220) die({ penalty: 280, label: "MOVING SPIKE WALL" });
       if (onlineMode && arenaConnection) {
         for (const trap of arenaTraps) {
           if (trap.ownerId !== arenaConnection.playerId && rectsOverlap(player, { x: trap.x - 18, y: trap.y - 18, w: 36, h: 36 })) {
@@ -677,11 +708,11 @@ export default function GameCanvas() {
       }
       for (const key of stage.keys) {
         if (!key.collected && rectsOverlap(player, { x: key.x - 10, y: key.y - 14, w: 20, h: 28 })) {
-          key.collected = true; save.keys += 1; save.keyIds.push(key.id); persist(save); music.blip(880, 0.12);
+          key.collected = true; save.keys += 1; save.keyIds.push(key.id); if (stage.mechanic === "key-lock-betrayal") doorLockedByBetrayal = true; persist(save); music.blip(880, 0.12);
         }
       }
       if (player.x > stage.exitX - 55 && player.x < stage.exitX + 55 && player.y + player.h > 300 && player.y < 385) {
-        if (!stage.keys[0]?.collected && !adminMode) { adminToast = "Key needed to Japa!"; adminToastUntil = now + 1500; music.blip(180, 0.12); player.x = Math.max(0, stage.exitX - 80); }
+        if ((stage.mechanic === "key-lock-betrayal" && doorLockedByBetrayal) || (!stage.keys[0]?.collected && !adminMode)) { adminToast = stage.mechanic === "key-lock-betrayal" ? "That key was the lock. Avoid it." : "Key needed to Japa!"; adminToastUntil = now + 1500; music.blip(180, 0.12); player.x = Math.max(0, stage.exitX - 80); }
         else clearLevel();
       }
       if (player.y > H + 55) die({ penalty: 50, label: "DIRTY GROUND" });
@@ -703,8 +734,9 @@ export default function GameCanvas() {
     const drawWorld = (now: number) => {
       drawBackground();
       ctx.save();
+      ctx.beginPath(); ctx.rect(0, 0, W, 432); ctx.clip();
       const jitter = shake ? Math.sin(now / 20) * shake : 0; ctx.translate(-cameraX + jitter, 0);
-      ctx.fillStyle = "#252124"; ctx.fillRect(0, 510, stage.width, 30);
+      ctx.fillStyle = "#252124"; ctx.fillRect(0, 432, stage.width, 24);
       for (const platform of stage.platforms) {
         ctx.fillStyle = platform.color || "#4f413c"; ctx.fillRect(platform.x, platform.y, platform.w, platform.h);
         ctx.fillStyle = world === 1 ? "#b8413d" : world === 2 ? "#bf9c41" : "#8b725f"; ctx.fillRect(platform.x, platform.y, platform.w, 5);
@@ -779,6 +811,7 @@ export default function GameCanvas() {
         }
       }
       ctx.restore();
+      ctx.fillStyle = "#050607"; ctx.fillRect(0, 432, W, 108);
       // HUD
       ctx.fillStyle = "rgba(7,8,10,.88)"; ctx.fillRect(0, 0, W, 64); ctx.fillStyle = WORLD_COLORS[world]; ctx.fillRect(0, 61, W, 3);
       drawText(ctx, `WORLD ${world + 1} // LEVEL ${currentLevel}`, 24, 18, 12, "#a6ada7", "left", "DM Mono"); drawText(ctx, WORLD_NAMES[world].toUpperCase(), 24, 42, 16, "#f7f1e6", "left", "Space Grotesk");
@@ -787,10 +820,11 @@ export default function GameCanvas() {
       drawText(ctx, "Ⅱ", 930, 28, 19, "#f7f1e6", "center", "DM Mono");
       if (now < reverseUntil) { ctx.fillStyle = "rgba(38,165,115,.9)"; ctx.fillRect(326, 74, 308, 32); drawText(ctx, "VILLAGE PEOPLE: CONTROLS REVERSED", 480, 90, 12, "#07120e", "center", "DM Mono"); }
       if (now < blackoutUntil) { ctx.fillStyle = "rgba(0,0,0,.96)"; ctx.fillRect(0, 0, W, H); drawText(ctx, "UP NEPA", W / 2, H / 2 - 15, 30, "#d6c15e", "center", "DM Mono"); drawText(ctx, "blackout wahala...", W / 2, H / 2 + 22, 14, "#8f8f7e", "center", "DM Mono"); }
+      if (now < fakeGameOverUntil) { ctx.fillStyle = "rgba(0,0,0,.98)"; ctx.fillRect(0, 0, W, 432); drawText(ctx, "GAME OVER", W / 2, 205, 44, "#e65c4b", "center", "Space Grotesk"); drawText(ctx, "...or is it? KEEP MOVING", W / 2, 250, 14, "#f0c86b", "center", "DM Mono"); }
       if (screen === "playing") {
-        const controlY = H - 100; const leftWidth = 175 * controlScale; const rightStart = 212 - (controlScale - 1) * 50; const rightWidth = 175 * controlScale; const jumpStart = 744 - (controlScale - 1) * 40; const jumpWidth = 185 * controlScale;
-        ctx.globalAlpha = 0.86; ctx.fillStyle = "#111418"; ctx.fillRect(22, controlY, leftWidth, 66 * controlScale); ctx.fillRect(rightStart, controlY, rightWidth, 66 * controlScale); if (onlineMode) ctx.fillRect(500 - (controlScale - 1) * 45, H - 111, 220 * controlScale, 77 * controlScale); ctx.fillRect(jumpStart, H - 111, jumpWidth, 77 * controlScale); ctx.globalAlpha = 1;
-        drawText(ctx, "◀", 22 + leftWidth / 2, controlY + 33 * controlScale, 30 * controlScale, "#e8e2d6", "center", "DM Mono"); drawText(ctx, "▶", rightStart + rightWidth / 2, controlY + 33 * controlScale, 30 * controlScale, "#e8e2d6", "center", "DM Mono"); drawText(ctx, "JUMP", jumpStart + jumpWidth / 2, H - 72, 20 * controlScale, WORLD_COLORS[world], "center", "DM Mono");
+        const controlY = 442; const leftWidth = 175 * controlScale; const rightStart = 212 - (controlScale - 1) * 50; const rightWidth = 175 * controlScale; const jumpStart = 744 - (controlScale - 1) * 40; const jumpWidth = 185 * controlScale;
+        ctx.globalAlpha = 0.86; ctx.fillStyle = "#111418"; ctx.fillRect(22, controlY, leftWidth, 66 * controlScale); ctx.fillRect(rightStart, controlY, rightWidth, 66 * controlScale); if (onlineMode) ctx.fillRect(500 - (controlScale - 1) * 45, 439, 220 * controlScale, 77 * controlScale); ctx.fillRect(jumpStart, 439, jumpWidth, 77 * controlScale); ctx.globalAlpha = 1;
+        drawText(ctx, "◀", 22 + leftWidth / 2, controlY + 33 * controlScale, 30 * controlScale, "#e8e2d6", "center", "DM Mono"); drawText(ctx, "▶", rightStart + rightWidth / 2, controlY + 33 * controlScale, 30 * controlScale, "#e8e2d6", "center", "DM Mono"); drawText(ctx, "JUMP", jumpStart + jumpWidth / 2, 478, 20 * controlScale, WORLD_COLORS[world], "center", "DM Mono");
         if (onlineMode) { const trapStart = 500 - (controlScale - 1) * 45; drawText(ctx, "DROP TRAP", trapStart + 110 * controlScale, H - 77, 16 * controlScale, "#e65c4b", "center", "DM Mono"); drawText(ctx, "SAPA · SPIKE · AWOOF", trapStart + 110 * controlScale, H - 48, 9 * controlScale, "#a5aaa1", "center", "DM Mono"); }
         drawText(ctx, "A / D or touch", 110, H - 18, 10, "#81877e", "center", "DM Mono"); drawText(ctx, "SPACE", 836, H - 18, 10, "#81877e", "center", "DM Mono");
         if (onlineMode) { drawText(ctx, arenaNotice, 480, 82, 11, "#f0c86b", "center", "DM Mono"); leaderboard.slice(0, 10).forEach((entry, index) => drawText(ctx, `${index + 1}. ${entry.name}  L${entry.level || 1}  ₦${entry.gbese}`, 780, 100 + index * 16, 10, index === 0 ? "#f0c86b" : "#a5aaa1", "left", "DM Mono")); }
@@ -844,11 +878,11 @@ export default function GameCanvas() {
       drawText(ctx, adminMode ? "ADMIN MODE · ALL 40 ROOMS AVAILABLE" : `PROGRESS ${save.progress[world] || 0}/10`, 72, 405, 12, adminMode ? "#cbb7ff" : "#f3cc65", "left", "DM Mono");
       drawButton(ctx, "BACK TO WORLDS", 72, 446, 205, 42, "#73858b", true);
     };
-    const drawOptions = () => { drawOverlay(); drawText(ctx, "ADJUST YOUR WAHALA", 80, 80, 32, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "the controls are already stressful enough", 82, 113, 13, "#8e978c", "left", "DM Mono"); drawButton(ctx, `MUSIC  //  ${MUSIC_TRACKS[musicTrack]}`, 82, 168, 420, 52, musicTrack === 0 ? "#73858b" : "#72c67f"); drawButton(ctx, `TOUCH CONTROLS  //  ${controlScale.toFixed(1)}x ${controlScale === 0.8 ? "SMALL" : controlScale === 1 ? "MEDIUM" : "LARGE"}`, 82, 236, 420, 52, "#c7a657"); drawButton(ctx, `STREAMER MODE  //  ${streamerEnabled ? "ON" : "OFF"}`, 82, 304, 420, 52, streamerEnabled ? "#72c67f" : "#73858b"); drawButton(ctx, "FLEX WARDROBE  //  OUTFIT + USERNAME", 82, 372, 420, 52, "#b78cff"); drawText(ctx, "tap a button to cycle. settings persist on this device.", 82, 442, 13, "#98a094", "left", "DM Mono"); drawButton(ctx, "BACK TO MENU", 82, 478, 188, 42, "#73858b", true); };
+    const drawOptions = () => { drawOverlay(); drawText(ctx, "ADJUST YOUR WAHALA", 80, 80, 32, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "the controls are already stressful enough", 82, 113, 13, "#8e978c", "left", "DM Mono"); drawButton(ctx, `MUSIC  //  ${MUSIC_TRACKS[musicTrack]}`, 82, 168, 420, 52, musicTrack === 0 ? "#73858b" : "#72c67f"); drawButton(ctx, `TOUCH CONTROLS  //  ${controlScale.toFixed(1)}x ${controlScale === 0.8 ? "SMALL" : controlScale === 1 ? "MEDIUM" : "LARGE"}`, 82, 236, 420, 52, "#c7a657"); drawButton(ctx, `STREAMER MODE  //  ${streamerEnabled ? "ON" : "OFF"}`, 82, 304, 420, 52, streamerEnabled ? "#72c67f" : "#73858b"); drawButton(ctx, "FLEX WARDROBE  //  OUTFIT + USERNAME", 82, 372, 420, 42, "#b78cff"); drawButton(ctx, "WALLET / BANK  //  $GU + PREMIUM", 82, 426, 420, 42, "#f0c86b"); drawButton(ctx, "BACK TO MENU", 82, 478, 188, 42, "#73858b", true); };
     const drawWardrobe = () => {
       const activeTab: "A" | "B" = wardrobeTab;
       const bottomBase = String(activeTab) === "B" ? 316 : 282;
-      drawOverlay(); drawText(ctx, "FLEX WARDROBE", 60, 42, 30, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, `${save.wardrobe.username} · ${save.wardrobe.equippedGroup === "A" ? "MATTE LOADOUT" : "SOFT LIFE METALS"}`, 62, 72, 12, "#a8afa5", "left", "DM Mono");
+      drawOverlay(); drawText(ctx, "FLEX WARDROBE", 60, 42, 30, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, `${save.wardrobe.username} · ${save.wardrobe.equippedGroup === "A" ? "MATTE LOADOUT" : "SOFT LIFE METALS"}`, 62, 72, 12, "#a8afa5", "left", "DM Mono"); drawButton(ctx, "BACK TO MENU", 675, 68, 225, 28, "#73858b", true);
       drawButton(ctx, "LAPO PIKIN  //  FREE", 60, 92, 260, 42, activeTab === "A" ? "#72c67f" : "#58635d", true); drawButton(ctx, "NEPO BABY  //  PREMIUM", 330, 92, 300, 42, String(activeTab) === "B" ? "#f0c86b" : "#58635d", true);
       const items = wardrobeItems();
       const drawItem = (item: WardrobeItem, index: number, y: number) => { const x = 60 + (index % 4) * 145; const yy = y + Math.floor(index / 4) * 48; const unlocked = isUnlocked(item, save.wardrobe); const selected = item.id === save.wardrobe.topId || item.id === save.wardrobe.bottomId; ctx.fillStyle = selected ? "rgba(57,87,62,.95)" : "rgba(18,22,24,.95)"; ctx.fillRect(x, yy, 132, 39); ctx.strokeStyle = unlocked ? item.color : "#555d58"; ctx.strokeRect(x + 1, yy + 1, 130, 37); ctx.fillStyle = item.color; ctx.fillRect(x + 8, yy + 11, 16, 16); drawText(ctx, unlocked ? item.label.replace(" Shorts", "") : `₦${item.price}`, x + 31, yy + 13, 9, unlocked ? "#f7f1e6" : "#8b938b", "left", "DM Mono"); drawText(ctx, selected ? "EQUIPPED" : unlocked ? "EQUIP" : "UNLOCK", x + 31, yy + 28, 8, unlocked ? item.color : "#8b938b", "left", "DM Mono"); };
@@ -856,7 +890,8 @@ export default function GameCanvas() {
       ctx.fillStyle = "rgba(19,22,24,.96)"; ctx.fillRect(675, 112, 225, 250); ctx.strokeStyle = String(activeTab) === "B" ? "#f0c86b" : "#72c67f"; ctx.strokeRect(676, 113, 223, 248); drawText(ctx, "LIVE FIT CHECK", 787, 136, 11, "#aeb6a9", "center", "DM Mono"); drawPixelBoy(ctx, 700, 165, 5, save.wardrobe); drawText(ctx, save.wardrobe.titleBadge ? `[${save.wardrobe.titleBadge}] ${save.wardrobe.username}` : save.wardrobe.username, 787, 300, 11, save.wardrobe.nameGlow ? "#ffe7a0" : "#f7f1e6", "center", "DM Mono");
       drawButton(ctx, `TITLE BADGE  //  ${save.wardrobe.titleBadge || (save.wardrobe.titleBadgeUnlocked ? "NONE" : "200 $GU")}`, 675, 330, 225, 32, save.wardrobe.titleBadgeUnlocked ? "#72c67f" : "#f0c86b", true); drawButton(ctx, "EDIT GAMER USERNAME", 675, 375, 225, 38, "#72c67f", true); drawButton(ctx, `GOLDEN NAME GLOW  //  ${save.wardrobe.nameGlow ? "ON" : "200 $GU"}`, 675, 420, 225, 38, save.wardrobe.nameGlow ? "#f0c86b" : "#73858b", true); drawButton(ctx, save.wardrobe.bundleUnlocked ? "OGA BOSS BUNDLE  //  UNLOCKED" : "OGA BOSS BUNDLE  //  2,000 $GU", 675, 465, 225, 38, "#b78cff", true); drawButton(ctx, `PAY WITH  //  ${paymentProvider === "flutterwave" ? "FLUTTERWAVE" : "PAYSTACK"}`, 675, 505, 225, 28, paymentProvider === "flutterwave" ? "#f0c86b" : "#42b883", true); drawText(ctx, `GBESE  ₦${save.debt.toLocaleString("en-NG")}   $GU  ${save.gu}`, 60, 485, 11, "#f3cc65", "left", "DM Mono"); topUpPacks.forEach((pack, index) => drawButton(ctx, `${pack.label}  ₦${pack.naira}`, 60 + index * 145, 505, 135, 28, "#5c9dd1", true));
     };
-    const drawCredits = () => { drawOverlay(); drawText(ctx, "PEOPLE WEY HELP BUILD THIS SHEGE", 74, 58, 26, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "A tiny arcade built with big wahala.", 76, 88, 12, "#8e978c", "left", "DM Mono"); drawText(ctx, "DESIGN", 80, 132, 11, "#72c67f", "left", "DM Mono"); drawText(ctx, "You + The Village People", 80, 153, 16, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "ENGINE", 80, 190, 11, "#c7a657", "left", "DM Mono"); drawText(ctx, "Canvas API · Vite · React · TypeScript", 80, 211, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Web Audio API · Express + Socket.io", 80, 231, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "MUSIC", 80, 270, 11, "#73858b", "left", "DM Mono"); drawText(ctx, "Chiptune + Fuji · Afro-Beats Rush", 80, 291, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Street-Pop Chaos", 80, 311, 14, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Frantic Talking Drum Dept.", 80, 331, 12, "#a5aaa1", "left", "DM Mono"); drawText(ctx, "DEVELOPER", 80, 370, 11, "#e65c4b", "left", "DM Mono"); drawText(ctx, "Azamen (Alpha Collective Corporation)", 80, 394, 17, "#f7f1e6", "left", "Space Grotesk"); drawButton(ctx, "BACK TO MENU", 80, 454, 188, 42, "#73858b", true); };
+    const drawCredits = () => { drawOverlay(); drawText(ctx, "DEVELOPER CREDITS", 72, 52, 30, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Executive Director & Lead Architect: GBODOMI", 72, 88, 14, "#72c67f", "left", "DM Mono"); drawText(ctx, "Studio: AZRA GAMES", 72, 112, 14, "#f0c86b", "left", "DM Mono"); drawText(ctx, "A special message to the players:", 72, 152, 13, "#f7f1e6", "left", "DM Mono"); drawText(ctx, "If you are reading this screen, it means two things:", 72, 178, 12, "#c6cbc3", "left", "DM Mono"); drawText(ctx, "either you are a certified legend who survived all 40 levels", 72, 198, 12, "#c6cbc3", "left", "DM Mono"); drawText(ctx, "of pure suffering, or you came looking for the maker.", 72, 218, 12, "#c6cbc3", "left", "DM Mono"); drawText(ctx, "Every invisible spike, telepathic trap door, and fake platform", 72, 252, 12, "#c6cbc3", "left", "DM Mono"); drawText(ctx, "was lovingly hand-coded by GBODOMI to test your stability.", 72, 272, 12, "#c6cbc3", "left", "DM Mono"); drawText(ctx, "If your eye is turning red or you scream GOD ABEG:", 72, 306, 12, "#f0c86b", "left", "DM Mono"); drawText(ctx, "WE WARNED YOU.", 72, 326, 14, "#e65c4b", "left", "DM Mono"); drawText(ctx, "AZRA GAMES takes zero responsibility for broken screen protectors,", 72, 360, 11, "#c6cbc3", "left", "DM Mono"); drawText(ctx, "cracked phone cases, high blood pressure, or village people attacks.", 72, 378, 11, "#c6cbc3", "left", "DM Mono"); drawText(ctx, "You don see Shege, but you still dey move. Respect!", 72, 414, 13, "#72c67f", "left", "DM Mono"); drawButton(ctx, "BACK TO MENU", 72, 468, 205, 42, "#73858b", true); };
+    const drawWallet = () => { drawOverlay(); drawText(ctx, "WALLET / BANK", 72, 64, 34, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Manage Gbese, buy $GU, and unlock premium tiers", 74, 96, 13, "#9fa89d", "left", "DM Mono"); ctx.fillStyle = "rgba(20,24,24,.96)"; ctx.fillRect(74, 125, 812, 110); ctx.strokeStyle = "#f0c86b"; ctx.strokeRect(75, 126, 810, 108); drawText(ctx, `GBESE BALANCE   ₦${save.debt.toLocaleString("en-NG")}`, 102, 165, 20, "#f0c86b", "left", "DM Mono"); drawText(ctx, `$GU BALANCE   ${save.gu}`, 102, 198, 20, "#72d88b", "left", "DM Mono"); drawButton(ctx, `PAY WITH  //  ${paymentProvider === "flutterwave" ? "FLUTTERWAVE" : "PAYSTACK"}`, 625, 150, 230, 48, paymentProvider === "flutterwave" ? "#f0c86b" : "#42b883", true); drawText(ctx, "TOP UP $GU", 74, 270, 12, "#a4ada2", "left", "DM Mono"); topUpPacks.forEach((pack, index) => drawButton(ctx, `${pack.label}  ₦${pack.naira}`, 60 + index * 145, 290, 135, 45, "#5c9dd1", true)); drawButton(ctx, save.wardrobe.bundleUnlocked ? "NEPO BABY BUNDLE  //  UNLOCKED" : "UNLOCK NEPO BABY BUNDLE  //  2,000 $GU", 300, 380, 360, 52, "#b78cff", true); drawText(ctx, "Premium purchases are verified server-side before balance credit.", 300, 456, 12, "#9fa89d", "left", "DM Mono"); drawButton(ctx, "BACK TO MENU", 72, 480, 205, 42, "#73858b", true); };
     const drawPause = () => { drawOverlay(); drawText(ctx, "HOLD ON SMALL", W / 2, 95, 34, "#f7f1e6", "center", "Space Grotesk"); drawText(ctx, "the shege is still here when you return", W / 2, 130, 13, "#9aa297", "center", "DM Mono"); drawButton(ctx, "WE MOVE", 335, 170, 290, 48, WORLD_COLORS[world]); drawButton(ctx, "TRY THIS SHEGE AGAIN", 335, 235, 290, 48, "#c7a657"); if (adminMode && !onlineMode) drawButton(ctx, "SKIP LEVEL  //  ADMIN MODE", 335, 300, 290, 48, "#b78cff"); drawButton(ctx, "JAPA FROM THE GAME", 335, adminMode && !onlineMode ? 365 : 300, 290, 48, "#73858b"); if (adminMode && !onlineMode) drawText(ctx, "OFFLINE GOD MODE ENABLED", W / 2, 445, 11, "#b78cff", "center", "DM Mono"); };
     const drawDead = () => { drawWorld(performance.now()); ctx.fillStyle = "rgba(71,20,26,.72)"; ctx.fillRect(0, 0, W, H); drawText(ctx, deathMessage, W / 2, 208, 26, "#fff0dc", "center", "Space Grotesk"); drawText(ctx, `GBESE +₦${deathPenalty}`, W / 2, 250, 18, "#ffbc6b", "center", "DM Mono"); drawText(ctx, "respawning in a blink...", W / 2, 300, 12, "#efb7a4", "center", "DM Mono"); if (onlineMode) drawButton(ctx, "SPECTATOR GHOST POWERS", 335, 350, 290, 44, "#b78cff", true); drawButton(ctx, "SHARE YOUR WAHALA", 335, onlineMode ? 405 : 355, 290, 44, "#72c67f", true); };
     const drawSpectator = () => { drawOverlay(); drawText(ctx, "GHOST MODE", W / 2, 75, 36, "#b78cff", "center", "Space Grotesk"); drawText(ctx, "you are eliminated — spend 100 Ghost Energy to cause minor wahala", W / 2, 112, 12, "#b9aeca", "center", "DM Mono"); drawText(ctx, `GHOST ENERGY  ${save.ghostEnergy}`, W / 2, 145, 16, "#f0c86b", "center", "DM Mono"); drawButton(ctx, "UP NEPA  ·  100 GHOST", 330, 175, 300, 44, "#f0c86b", true); drawButton(ctx, "VILLAGE PEOPLE  ·  100 GHOST", 330, 245, 300, 44, "#72c67f", true); drawButton(ctx, "GOD ABEG SPIKES  ·  100 GHOST", 330, 315, 300, 44, "#e65c4b", true); drawText(ctx, leaderboard.slice(0, 10).map((entry, index) => `${index + 1}. ${entry.name}  ₦${entry.gbese}`).join("   "), W / 2, 395, 10, "#d4d9d1", "center", "DM Mono"); drawButton(ctx, "JAPA FROM SPECTATOR", 330, 440, 300, 42, "#73858b", true); };
@@ -864,7 +899,7 @@ export default function GameCanvas() {
 
     const draw = (now: number) => {
       ctx.save(); ctx.setTransform(canvas.width / W, 0, 0, canvas.height / H, 0, 0); ctx.clearRect(0, 0, W, H);
-      if (screen === "title") drawTitle(); else if (screen === "worlds") drawWorlds(); else if (screen === "levels") drawLevels(); else if (screen === "wardrobe") drawWardrobe(); else if (screen === "arena") drawArena(); else if (screen === "options") drawOptions(); else if (screen === "credits") drawCredits(); else if (screen === "playing") drawWorld(now); else if (screen === "paused") { drawWorld(now); drawPause(); } else if (screen === "dead") drawDead(); else if (screen === "spectator") drawSpectator(); else if (screen === "clear") drawClear();
+      if (screen === "title") drawTitle(); else if (screen === "worlds") drawWorlds(); else if (screen === "levels") drawLevels(); else if (screen === "wardrobe") drawWardrobe(); else if (screen === "wallet") drawWallet(); else if (screen === "arena") drawArena(); else if (screen === "options") drawOptions(); else if (screen === "credits") drawCredits(); else if (screen === "playing") drawWorld(now); else if (screen === "paused") { drawWorld(now); drawPause(); } else if (screen === "dead") drawDead(); else if (screen === "spectator") drawSpectator(); else if (screen === "clear") drawClear();
       if (clearMessage && now < clearUntil) { ctx.fillStyle = "rgba(18,37,28,.96)"; ctx.fillRect(160, 72, 640, 48); ctx.strokeStyle = "#72c67f"; ctx.lineWidth = 2; ctx.strokeRect(161, 73, 638, 46); drawText(ctx, clearMessage, W / 2, 96, 14, "#d8f6b4", "center", "DM Mono"); }
       if (adminToast && now < adminToastUntil) { ctx.fillStyle = "rgba(19,13,31,.96)"; ctx.fillRect(170, 24, 620, 48); ctx.strokeStyle = "#b78cff"; ctx.lineWidth = 2; ctx.strokeRect(171, 25, 618, 46); drawText(ctx, adminToast, W / 2, 48, 15, "#f0ddff", "center", "DM Mono"); }
       ctx.restore();

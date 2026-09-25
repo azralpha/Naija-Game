@@ -2,7 +2,14 @@ export type WorldIndex = 0 | 1 | 2 | 3;
 export type LevelHazardKind = "spike" | "disappear" | "movingWall" | "lateSpike" | "reverse" | "gravityFlip" | "multi" | "teleporter" | "jumpPad" | "safetyTile" | "glue" | "boulder" | "shoker" | "fakeKey" | "fakeCoin" | "mudSweep";
 export type LevelPlatform = { x: number; y: number; w: number; h: number; color: string };
 export type LevelHazard = { kind: LevelHazardKind; x: number; y: number; w: number; h: number; penalty: number; label: string; phase?: number };
-export type LevelDefinition = { world: WorldIndex; level: number; name: string; map: string[]; platforms: LevelPlatform[]; hazards: LevelHazard[]; exitX: number; spawn: { x: number; y: number }; width: number };
+export const RAGE_MECHANICS = [
+  "fake-solid-floor", "sinking-ledges", "awoof-gravity-coin", "door-teleport-left", "fade-platform", "permanent-reverse", "glue-lock", "walk-only-bridge", "fake-door-pair", "apex-disintegration",
+  "landing-spikes", "falling-ceiling", "shrinking-platforms", "elastic-ground", "invisible-wall", "key-lock-betrayal", "conveyor-pit", "door-floor-drop", "phantom-spikes", "reverse-clone",
+  "air-ui-blackout", "fake-pause-anvil", "camera-flip", "hidden-secondary-door", "zero-friction", "closing-pillars", "apex-expanding-pit", "falling-scare-platform", "delayed-jump", "spike-door",
+  "gravity-zones", "jump-blackout", "moving-door", "contact-explosion", "fake-game-over", "backwind", "shifting-respawn", "tiny-platforms", "spike-wall-timer", "gauntlet",
+] as const;
+export type RageMechanic = typeof RAGE_MECHANICS[number];
+export type LevelDefinition = { world: WorldIndex; level: number; name: string; mechanic: RageMechanic; map: string[]; platforms: LevelPlatform[]; hazards: LevelHazard[]; exitX: number; spawn: { x: number; y: number }; width: number };
 
 const WORLD_COLORS = ["#4f413c", "#5b262d", "#2e3d51", "#4a3568"];
 const WORLD_NAMES = ["Sapa Nation", "Shege Pro Max", "Trenches & Katakata", "Soft Life Protocol"];
@@ -94,8 +101,10 @@ function tileRowsToDefinition(world: WorldIndex, level: number, rows: string[]):
   if (world >= 1 && level % 5 === 0) hazards.push({ kind: "fakeCoin", x: 760, y: 348, w: 28, h: 28, penalty: 2000, label: "FAKE COIN DROP" });
   if (world === 2 && level % 2 === 1) hazards.push({ kind: "mudSweep", x: 420, y: 430, w: 260, h: 20, penalty: 190, label: "TRENCHES MUD SWEEP" });
   // The door is intentionally not always on the same tile even when the room ends.
-  exitX = Math.min(rows[0].length * 64 - 90, exitX + ((world * 10 + level) * 37) % 160);
-  return { world, level, name: `${WORLD_NAMES[world]} ${level}`, map: rows, platforms, hazards, exitX, spawn, width: rows[0].length * 64 };
+  const mechanic = RAGE_MECHANICS[world * 10 + level - 1];
+  const width = 3200 + world * 160 + level * 24;
+  exitX = 2680 + ((world * 10 + level) * 97) % 480;
+  return { world, level, name: `${WORLD_NAMES[world]} ${level}`, mechanic, map: rows, platforms, hazards, exitX, spawn, width };
 }
 
 export const LEVELS: LevelDefinition[] = ROOM_MAPS.flatMap((worldRooms, world) => worldRooms.map((rows, index) => tileRowsToDefinition(world as WorldIndex, index + 1, rows)));
