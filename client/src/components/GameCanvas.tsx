@@ -3,9 +3,9 @@ import { connectArena, type ArenaConnection, type ArenaLeaderboardEntry, type Ar
 import { getLevel, type RageMechanic, type WorldIndex } from "../game/levelData";
 import { DEFAULT_WARDROBE, GROUP_A_BOTTOMS, GROUP_A_TOPS, GROUP_B_BOTTOMS, GROUP_B_TOPS, equipItem, isUnlocked, itemById, type WardrobeItem } from "../game/wardrobe";
 
-type Screen = "title" | "worlds" | "levels" | "wardrobe" | "wallet" | "arena" | "options" | "credits" | "playing" | "paused" | "dead" | "spectator" | "clear";
+type Screen = "title" | "worlds" | "levels" | "wardrobe" | "wallet" | "support" | "arena" | "options" | "credits" | "playing" | "paused" | "dead" | "spectator" | "clear";
 type PaymentProvider = "flutterwave" | "paystack";
-type Platform = { x: number; y: number; w: number; h: number; vanish?: boolean; color?: string };
+type Platform = { x: number; y: number; w: number; h: number; vanish?: boolean; color?: string; kind?: "solid" | "one-way" | "moving"; waypoints?: Array<{ x: number; y: number }> };
 type HazardKind =
   | "spike"
   | "falling"
@@ -44,7 +44,8 @@ type Hazard = {
   triggered?: boolean;
 };
 type KeyPickup = { id: string; x: number; y: number; collected: boolean };
-type SaveData = { debt: number; gu: number; ghostEnergy: number; hasToppedUp: boolean; keys: number; unlocked: number; keyIds: string[]; adminMode: boolean; progress: number[]; wardrobe: typeof DEFAULT_WARDROBE };
+type GbCoin = { id: string; x: number; y: number; collected: boolean };
+type SaveData = { debt: number; gu: number; ghostEnergy: number; hasToppedUp: boolean; supporter: boolean; keys: number; unlocked: number; keyIds: string[]; adminMode: boolean; progress: number[]; wardrobe: typeof DEFAULT_WARDROBE };
 type Stage = {
   world: WorldIndex;
   mechanic: RageMechanic;
@@ -52,10 +53,11 @@ type Stage = {
   platforms: Platform[];
   hazards: Hazard[];
   keys: KeyPickup[];
+  coins: GbCoin[];
   exitX: number;
   spawn: { x: number; y: number };
 };
-type Player = { x: number; y: number; w: number; h: number; vx: number; vy: number; grounded: boolean; coyote: number };
+type Player = { x: number; y: number; w: number; h: number; vx: number; vy: number; grounded: boolean; coyote: number; jumpsRemaining: number };
 
 const W = 960;
 const H = 540;
@@ -84,7 +86,7 @@ function loadSave(): SaveData {
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null") as Partial<SaveData> | null;
     return {
       debt: Math.max(0, Number(stored?.debt) || 0),
-      gu: Math.max(0, Number(stored?.gu) || 0), ghostEnergy: Math.max(0, Number(stored?.ghostEnergy) || 0), hasToppedUp: stored?.hasToppedUp === true,
+      gu: Math.max(0, Number(stored?.gu) || 0), ghostEnergy: Math.max(0, Number(stored?.ghostEnergy) || 0), hasToppedUp: stored?.hasToppedUp === true, supporter: stored?.supporter === true,
       keys: Math.max(0, Number(stored?.keys) || 0),
       unlocked: Math.min(3, Math.max(0, Number(stored?.unlocked) || 0)),
       keyIds: Array.isArray(stored?.keyIds) ? stored!.keyIds! : [],
@@ -93,7 +95,7 @@ function loadSave(): SaveData {
       wardrobe: { ...DEFAULT_WARDROBE, ...(stored?.wardrobe || {}), unlockedB: Array.isArray(stored?.wardrobe?.unlockedB) ? stored.wardrobe!.unlockedB : [] },
     };
   } catch {
-    return { debt: 0, gu: 0, ghostEnergy: 0, hasToppedUp: false, keys: 0, unlocked: 0, keyIds: [], adminMode: false, progress: [1, 0, 0, 0], wardrobe: { ...DEFAULT_WARDROBE, unlockedB: [] } };
+    return { debt: 0, gu: 0, ghostEnergy: 0, hasToppedUp: false, supporter: false, keys: 0, unlocked: 0, keyIds: [], adminMode: false, progress: [1, 0, 0, 0], wardrobe: { ...DEFAULT_WARDROBE, unlockedB: [] } };
   }
 }
 
@@ -133,6 +135,8 @@ function stageFor(world: WorldIndex, level: number, save: SaveData): Stage {
   const definition = getLevel(world, level);
   const keys: KeyPickup[] = [{ id: `${world}-${level}-a`, x: 390, y: 350, collected: false }];
   keys.forEach((key) => { key.collected = save.keyIds.includes(key.id); });
+  const coins: GbCoin[] = [560, 880, 1240, 1600, 1960, 2320].map((x, index) => ({ id: `${world}-${level}-coin-${index}`, x, y: 330 - (index % 2) * 70, collected: false }));
+  coins.forEach((coin) => { coin.collected = save.keyIds.includes(coin.id); });
   const floorPlatforms = definition.mechanic === "fake-solid-floor" ? [{ x: 0, y: 432, w: 860, h: 24, color: "#4f413c" }, { x: 1180, y: 432, w: definition.width - 1180, h: 24, color: "#4f413c" }] : [{ x: 0, y: 432, w: definition.width, h: 24, color: "#4f413c" }];
   return {
     world,
@@ -141,13 +145,14 @@ function stageFor(world: WorldIndex, level: number, save: SaveData): Stage {
     platforms: [...definition.platforms, ...floorPlatforms],
     hazards: definition.hazards.map((hazard) => ({ ...hazard, originX: hazard.x })) as Hazard[],
     keys,
+    coins,
     exitX: definition.exitX,
     spawn: definition.spawn,
   };
 }
 
 function createPlayer(stage: Stage): Player {
-  return { x: stage.spawn.x, y: stage.spawn.y, w: 32, h: 33, vx: 0, vy: 0, grounded: false, coyote: 0 };
+  return { x: stage.spawn.x, y: stage.spawn.y, w: 32, h: 33, vx: 0, vy: 0, grounded: false, coyote: 0.12, jumpsRemaining: 2 };
 }
 
 class MusicBox {
@@ -285,7 +290,7 @@ export default function GameCanvas() {
     canvas.width = W; canvas.height = H; ctx.imageSmoothingEnabled = false;
 
     const query = new URLSearchParams(window.location.search);
-    let screen: Screen = query.has("demo") ? "playing" : query.has("wardrobe") ? "wardrobe" : query.has("wallet") ? "wallet" : query.has("credits") ? "credits" : "title";
+    let screen: Screen = query.has("demo") ? "playing" : query.has("wardrobe") ? "wardrobe" : query.has("wallet") ? "wallet" : query.has("support") ? "support" : query.has("credits") ? "credits" : "title";
     let onlineMode = false;
     let arenaConnection: ArenaConnection | null = null;
     let remotePlayers: RemotePlayer[] = [];
@@ -309,6 +314,11 @@ export default function GameCanvas() {
       const username = (entered || DEFAULT_WARDROBE.username).trim().slice(0, 18) || DEFAULT_WARDROBE.username;
       save.wardrobe.username = username; persist(save);
     }
+    const cloudUserId = localStorage.getItem("nnl-user-id") || crypto.randomUUID();
+    localStorage.setItem("nnl-user-id", cloudUserId);
+    const syncCloudProfile = async () => { try { const response = await fetch("/api/player/sync", { headers: { "x-user-id": cloudUserId } }); if (!response.ok) return; const data = await response.json() as { profile?: { guBalance?: number; gbeseBalance?: number; supporter?: boolean; inventory?: string[] } }; if (!data.profile) return; save.gu = Math.max(0, Number(data.profile.guBalance) || 0); save.debt = Math.max(0, Number(data.profile.gbeseBalance) || 0); save.supporter = data.profile.supporter === true; const owned = Array.isArray(data.profile.inventory) ? data.profile.inventory : []; save.wardrobe.unlockedB = Array.from(new Set(save.wardrobe.unlockedB.concat(owned))); persist(save); } catch { /* cloud sync is best-effort while offline */ } };
+    const updateCloudGbese = (delta: number) => { void fetch("/api/player/update-gbese", { method: "POST", headers: { "Content-Type": "application/json", "x-user-id": cloudUserId }, body: JSON.stringify({ delta }) }).then(() => syncCloudProfile()).catch(() => undefined); };
+    void syncCloudProfile();
     let stage = stageFor(world, currentLevel, save);
     let player = createPlayer(stage);
     let cameraX = 0;
@@ -328,6 +338,7 @@ export default function GameCanvas() {
     let fakeGameOverUntil = 0;
     let doorLockedByBetrayal = false;
     let jumpDelayUntil = 0;
+    let jumpBuffer = 0;
     let shiftingRespawn = 0;
     let shake = 0;
     let standStill = 0;
@@ -375,18 +386,18 @@ export default function GameCanvas() {
     const wardrobeItems = () => wardrobeTab === "A" ? { tops: GROUP_A_TOPS, bottoms: GROUP_A_BOTTOMS } : { tops: GROUP_B_TOPS, bottoms: GROUP_B_BOTTOMS };
     const chooseWardrobeItem = (item: WardrobeItem) => {
       if (!isUnlocked(item, save.wardrobe)) {
-        if (save.debt < item.price) { adminToast = `Need ₦${item.price.toLocaleString("en-NG")} GB to unlock this piece.`; adminToastUntil = performance.now() + 2200; return; }
-        save.debt -= item.price; save.wardrobe.unlockedB = Array.from(new Set(save.wardrobe.unlockedB.concat(item.id)));
+        if (save.gu < item.price) { adminToast = "Insufficient $GU balance! Open Wallet / Bank to top up."; adminToastUntil = performance.now() + 2600; return; }
+        save.gu -= item.price; save.wardrobe.unlockedB = Array.from(new Set(save.wardrobe.unlockedB.concat(item.id)));
       }
       save.wardrobe = equipItem(item, save.wardrobe); persist(save); music.blip(880, 0.1);
     };
     const buyBundle = () => {
       if (save.wardrobe.bundleUnlocked) { save.wardrobe.nameGlow = !save.wardrobe.nameGlow; persist(save); return; }
-      if (save.debt < 2000 && !adminMode) { adminToast = "Oga Boss Bundle needs ₦2,000 GB. Payment adapter ready for checkout."; adminToastUntil = performance.now() + 2600; return; }
-      save.debt = adminMode ? save.debt : save.debt - 2000;
+      if (save.gu < 2000 && !adminMode) { adminToast = "Insufficient $GU balance! Open Wallet / Bank to top up."; adminToastUntil = performance.now() + 2600; return; }
+      save.gu = adminMode ? save.gu : save.gu - 2000;
       save.wardrobe.bundleUnlocked = true; save.wardrobe.nameGlow = true; save.wardrobe.titleBadgeUnlocked = true; save.wardrobe.unlockedB = [...GROUP_B_TOPS, ...GROUP_B_BOTTOMS].map((item) => item.id); persist(save); music.blip(1320, 0.2);
     };
-    const topUpPacks = [{ label: "SAPA RELIEF", naira: 300, gu: 350 }, { label: "WORKING MAN", naira: 500, gu: 650 }, { label: "OGA BOSS", naira: 1000, gu: 1500 }, { label: "CHAIRMAN", naira: 2000, gu: 3200 }];
+    const topUpPacks = [{ id: "flex_starter", label: "FLEX STARTER PACK", naira: 300, gu: 350 }, { id: "working_man", label: "WORKING MAN", naira: 500, gu: 650 }, { id: "oga_bundle", label: "OGA BUNDLE", naira: 1000, gu: 1500 }, { id: "chairman_pack", label: "CHAIRMAN PACK", naira: 2000, gu: 3200 }];
     const cyclePaymentProvider = () => { paymentProvider = paymentProvider === "flutterwave" ? "paystack" : "flutterwave"; persistPaymentProvider(paymentProvider); adminToast = `Payment provider: ${paymentProvider === "flutterwave" ? "Flutterwave" : "Paystack"}`; adminToastUntil = performance.now() + 1800; };
     const beginTopUp = (pack: typeof topUpPacks[number]) => {
       const env = (import.meta as ImportMeta & { env?: Record<string, string> }).env || {};
@@ -397,18 +408,18 @@ export default function GameCanvas() {
         const checkout = (window as Window & { FlutterwaveCheckout?: (config: Record<string, unknown>) => void }).FlutterwaveCheckout;
         const publicKey = env.VITE_FLUTTERWAVE_PUBLIC_KEY;
         if (!checkout || !publicKey) { adminToast = "Flutterwave is not configured yet."; adminToastUntil = performance.now() + 2200; return; }
-        checkout({ public_key: publicKey, tx_ref: reference, amount: pack.naira, currency: "NGN", payment_options: "card,banktransfer,ussd", customer: { email, name: save.wardrobe.username }, customizations: { title: pack.label, description: `${pack.gu} $GU top-up for Naija Normal Level` }, callback: (response: { status?: string; transaction_id?: number }) => { if (response.status === "successful" && response.transaction_id) void credit(String(response.transaction_id)); }, onclose: () => undefined });
+        checkout({ public_key: publicKey, tx_ref: reference, amount: pack.naira, currency: "NGN", payment_options: "card,banktransfer,ussd", customer: { email, name: save.wardrobe.username }, meta: [{ metaname: "user_id", metavalue: cloudUserId }, { metaname: "gu_package_id", metavalue: pack.id }], customizations: { title: pack.label, description: `${pack.gu} $GU top-up for Naija Normal Level` }, callback: (response: { status?: string; transaction_id?: number }) => { if (response.status === "successful" && response.transaction_id) void credit(String(response.transaction_id)); }, onclose: () => undefined });
         return;
       }
       const paystack = (window as Window & { PaystackPop?: { setup: (config: Record<string, unknown>) => { openIframe: () => void } } }).PaystackPop;
       const publicKey = env.VITE_PAYSTACK_PUBLIC_KEY;
-      if (!paystack || !publicKey) { adminToast = "Paystack is not configured yet."; adminToastUntil = performance.now() + 2200; return; }
-      paystack.setup({ key: publicKey, email, amount: pack.naira * 100, currency: "NGN", ref: reference, metadata: { custom_fields: [{ display_name: "GU Pack", variable_name: "gu_pack", value: String(pack.gu) }] }, callback: (response: { status?: string; reference?: string }) => { if (response.status === "success" && response.reference) void credit(response.reference); }, onClose: () => undefined }).openIframe();
+      if (!paystack || !publicKey) { paymentProvider = "flutterwave"; persistPaymentProvider(paymentProvider); adminToast = "Paystack down small. Switching to Flutterwave..."; adminToastUntil = performance.now() + 2600; window.setTimeout(() => beginTopUp(pack), 300); return; }
+      paystack.setup({ key: publicKey, email, amount: pack.naira * 100, currency: "NGN", ref: reference, metadata: { user_id: cloudUserId, gu_package_id: pack.id, custom_fields: [{ display_name: "GU Pack", variable_name: "gu_pack", value: String(pack.gu) }] }, callback: (response: { status?: string; reference?: string }) => { if (response.status === "success" && response.reference) void credit(response.reference); else { paymentProvider = "flutterwave"; persistPaymentProvider(paymentProvider); adminToast = "Paystack down small. Switching to Flutterwave..."; adminToastUntil = performance.now() + 2600; window.setTimeout(() => beginTopUp(pack), 300); } }, onClose: () => undefined }).openIframe();
     };
     const cycleBadge = () => {
       if (!save.wardrobe.titleBadgeUnlocked && !save.wardrobe.bundleUnlocked && !adminMode) {
-        if (save.debt < 200) { adminToast = "Custom title badge needs ₦200 GB. Checkout adapter ready."; adminToastUntil = performance.now() + 2400; return; }
-        save.debt -= 200; save.wardrobe.titleBadgeUnlocked = true; persist(save);
+        if (save.gu < 200) { adminToast = "Insufficient $GU balance! Open Wallet / Bank to top up."; adminToastUntil = performance.now() + 2400; return; }
+        save.gu -= 200; save.wardrobe.titleBadgeUnlocked = true; persist(save);
       }
       const badges = ["", "OGA BOSS", "VIP", "SHEGE LORD"]; const next = (badges.indexOf(save.wardrobe.titleBadge) + 1) % badges.length; save.wardrobe.titleBadge = badges[next]; persist(save);
     };
@@ -451,6 +462,10 @@ export default function GameCanvas() {
         arenaNotice = data.ok ? "YouTube chat connected. Commands are live." : data.error || "Streamer connection failed.";
       } catch { arenaNotice = "Streamer API unavailable in this preview."; }
     };
+    const tipPackages = [{ id: "dev_water", label: "BUY DEV WATER", amount: 1000 }, { id: "dev_masa", label: "BUY DEV MASA / BREAD", amount: 2000 }, { id: "dev_generator", label: "FUEL DEV GENERATOR", amount: 5000 }, { id: "oga_chairman_support", label: "OGA CHAIRMAN SUPPORT", amount: 10000 }];
+    const beginTip = async (tip: typeof tipPackages[number]) => { try { const response = await fetch("/api/developer/tip-intent", { method: "POST", headers: { "Content-Type": "application/json", "x-user-id": cloudUserId }, body: JSON.stringify({ package_id: tip.id }) }); const intent = await response.json() as { reference?: string; amountNgn?: number }; if (!response.ok || !intent.reference) throw new Error("tip intent failed"); const env = (import.meta as ImportMeta & { env?: Record<string, string> }).env || {}; const paystack = (window as Window & { PaystackPop?: { setup: (config: Record<string, unknown>) => { openIframe: () => void } } }).PaystackPop; if (!paystack || !env.VITE_PAYSTACK_PUBLIC_KEY) throw new Error("Paystack is not configured yet."); paystack.setup({ key: env.VITE_PAYSTACK_PUBLIC_KEY, email: `${save.wardrobe.username.replace(/\s+/g, ".").toLowerCase()}@nnl.game`, amount: tip.amount * 100, currency: "NGN", ref: intent.reference, metadata: { user_id: cloudUserId, tip_package_id: tip.id }, callback: () => { save.supporter = true; save.wardrobe.titleBadge = "DEV SPONSOR"; save.wardrobe.titleBadgeUnlocked = true; persist(save); adminToast = "God bless your pocket! You just saved the developer from Sapa."; adminToastUntil = performance.now() + 4000; screen = "title"; }, onClose: () => undefined }).openIframe(); } catch { adminToast = "Tip checkout is unavailable right now. Try again later."; adminToastUntil = performance.now() + 2400; } };
+    const drawSupport = () => { drawOverlay(); drawText(ctx, "SUPPORT THE DEVELOPER", 72, 62, 32, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Soft life for dev · voluntary · never a paywall", 74, 96, 13, "#a2aaa0", "left", "DM Mono"); drawText(ctx, save.supporter ? "DEV SPONSOR STATUS: ACTIVE" : "Every tip unlocks a permanent Dev Sponsor title.", 74, 136, 14, save.supporter ? "#72c67f" : "#f0c86b", "left", "DM Mono"); tipPackages.forEach((tip, index) => drawButton(ctx, `${tip.label}  //  ₦${tip.amount.toLocaleString("en-NG")}`, 90, 180 + index * 60, 480, 44, index === 3 ? "#b78cff" : "#f0c86b", true)); drawText(ctx, "Custom amount: use the Wallet tip flow when enabled.", 90, 444, 12, "#9fa89d", "left", "DM Mono"); drawButton(ctx, "BACK TO MENU", 90, 474, 205, 42, "#73858b", true); };
+
     const enterArena = () => {
       onlineMode = true; screen = "arena"; music.start(); arenaConnection?.leave();
       arenaConnection = connectArena({
@@ -499,11 +514,13 @@ export default function GameCanvas() {
     const die = (hazard: Hazard | { penalty: number; label: string }) => {
       if (screen !== "playing") return;
       deathPenalty = hazard.penalty; save.debt += hazard.penalty; persist(save);
+      updateCloudGbese(hazard.penalty);
       deathMessage = `${save.wardrobe.username}, ${DEATH_MESSAGES[Math.floor(Math.random() * DEATH_MESSAGES.length)].replace(/[.!…]+$/, "")}!`; deathUntil = performance.now() + 900;
       screen = "dead"; shake = 10; music.blip(110, 0.18);
     };
     const clearLevel = () => {
       save.debt = Math.max(0, save.debt - 2000);
+      updateCloudGbese(-2000);
       if (currentLevel < 10) currentLevel += 1;
       else if (world < 3) { save.unlocked = Math.max(save.unlocked, world + 1); world = (world + 1) as WorldIndex; currentLevel = 1; }
       save.progress[world] = Math.max(save.progress[world] || 0, currentLevel);
@@ -542,6 +559,7 @@ export default function GameCanvas() {
         else if (p.x >= 70 && p.x <= 470 && p.y > 315 && p.y < 380) screen = "worlds";
         else if (p.x >= 70 && p.x <= 430 && p.y > 380 && p.y < 430) screen = "options";
         else if (p.x >= 70 && p.x <= 430 && p.y > 430 && p.y < 485) screen = "credits";
+        else if (p.x > 650 && p.y > 450) screen = "support";
       } else if (screen === "arena") {
         if (p.y > 260 && p.y < 325) { world = 0; currentLevel = 1; stage = stageFor(world, currentLevel, save); player = createPlayer(stage); screen = "playing"; arenaNotice = "Arena live. Sabotage tokens ready."; }
         else if (p.y > 345 && p.y < 405) void configureStreamer();
@@ -568,17 +586,22 @@ export default function GameCanvas() {
         else if (p.x > 660 && p.y >= 500) cyclePaymentProvider();
         else if (p.y > 500 && p.x < 640) { const packIndex = Math.floor((p.x - 60) / 145); if (packIndex >= 0 && packIndex < topUpPacks.length) beginTopUp(topUpPacks[packIndex]); }
         else if (p.y > 500) screen = "options";
+      } else if (screen === "support") {
+        if (p.y >= 170 && p.y < 430) { const index = Math.floor((p.y - 180) / 60); if (index >= 0 && index < tipPackages.length) void beginTip(tipPackages[index]); }
+        else if (p.y > 440) screen = "title";
       } else if (screen === "wallet") {
         if (p.y > 120 && p.y < 175 && p.x > 620) cyclePaymentProvider();
         else if (p.y > 185 && p.y < 250 && p.x < 640) { const packIndex = Math.floor((p.x - 60) / 145); if (packIndex >= 0 && packIndex < topUpPacks.length) beginTopUp(topUpPacks[packIndex]); }
         else if (p.y > 270 && p.y < 335) buyBundle();
-        else if (p.y > 430) screen = "title";
+        else if (p.y > 430 && p.y < 480) screen = "support";
+        else if (p.y >= 480) screen = "title";
       } else if (screen === "options" || screen === "credits") {
         if (screen === "options" && p.y > 155 && p.y < 225) cycleMusic();
         else if (screen === "options" && p.y > 225 && p.y < 295) cycleControls();
         else if (screen === "options" && p.y > 295 && p.y < 370) void configureStreamer();
-        else if (screen === "options" && p.y > 370 && p.y < 425) screen = "wardrobe";
-        else if (screen === "options" && p.y > 425 && p.y < 470) screen = "wallet";
+        else if (screen === "options" && p.y > 370 && p.y < 425) { void syncCloudProfile(); screen = "wardrobe"; }
+        else if (screen === "options" && p.y > 425 && p.y < 470) { void syncCloudProfile(); screen = "wallet"; }
+        else if (screen === "options" && p.y > 470) screen = "support";
         else if (p.y > 440) screen = "title";
       } else if (screen === "paused") {
         if (p.y > 165 && p.y < 225) screen = "playing";
@@ -625,6 +648,8 @@ export default function GameCanvas() {
       if (screen === "dead") { if (now > deathUntil) resetLevel(); return; }
       if (screen !== "playing") return;
       const control = input();
+      if (pressed.jump || (demo && control.jump)) jumpBuffer = 0.1;
+      jumpBuffer = Math.max(0, jumpBuffer - dt);
       if (stage.mechanic === "permanent-reverse" || stage.mechanic === "reverse-clone" || stage.mechanic === "gauntlet") reverseUntil = Math.max(reverseUntil, now + 80);
       const reverse = now < reverseUntil;
       const left = reverse ? control.right : control.left;
@@ -640,18 +665,21 @@ export default function GameCanvas() {
       player.vy += gravity * dt;
       if (stage.mechanic === "delayed-jump" && pressed.jump) jumpDelayUntil = now + 300;
       const jumpPressed = stage.mechanic === "delayed-jump" ? now >= jumpDelayUntil && control.jump : control.jump;
-      if (jumpPressed && (pressed.jump || demo || stage.mechanic === "delayed-jump") && (player.grounded || player.coyote > 0)) {
-        if (now < fakeJumpUntil) { music.blip(150, 0.08); } else { player.vy = gravity > 0 ? -570 : 570; player.grounded = false; player.coyote = 0; music.blip(660, 0.06); }
+      if (jumpPressed && (jumpBuffer > 0 || demo || stage.mechanic === "delayed-jump") && (player.grounded || player.coyote > 0 || player.jumpsRemaining > 0)) {
+        if (now < fakeJumpUntil) { music.blip(150, 0.08); } else { player.vy = gravity > 0 ? -570 : 570; player.grounded = false; player.coyote = 0; player.jumpsRemaining = Math.max(0, player.jumpsRemaining - 1); jumpBuffer = 0; music.blip(660, 0.06); }
       }
       pressed.jump = false;
       const prevBottom = player.y + player.h;
       player.x += player.vx * dt; player.y += player.vy * dt;
       player.grounded = false; player.coyote = Math.max(0, player.coyote - dt);
       for (const platform of stage.platforms) {
+        if (platform.kind === "moving" && platform.waypoints?.length) { const waypoint = platform.waypoints[Math.floor(elapsed / 1.8) % platform.waypoints.length]; platform.x += (waypoint.x - platform.x) * Math.min(1, dt * 2); platform.y += (waypoint.y - platform.y) * Math.min(1, dt * 2); }
         const disappearing = platform.vanish && platform.w < 0;
         if (disappearing) continue;
-        if (player.vy >= 0 && prevBottom <= platform.y + 6 && player.y + player.h >= platform.y && player.x + player.w > platform.x && player.x < platform.x + platform.w) {
-          player.y = platform.y - player.h; player.vy = 0; player.grounded = true; player.coyote = 0.09;
+        const dropThrough = keysDown.has("arrowdown") || keysDown.has("s");
+        const canLand = platform.kind !== "one-way" || (!dropThrough && player.vy >= 0 && prevBottom <= platform.y + 6);
+        if (player.vy >= 0 && canLand && prevBottom <= platform.y + 6 && player.y + player.h >= platform.y && player.x + player.w > platform.x && player.x < platform.x + platform.w) {
+          player.y = platform.y - player.h; player.vy = 0; player.grounded = true; player.coyote = 0.12; player.jumpsRemaining = 2;
           if (stage.mechanic === "sinking-ledges" && platform.y < 432) platform.y += Math.min(170, dt * 1700);
           if (stage.mechanic === "fade-platform" && platform.y < 432) platform.w = -1;
           if (stage.mechanic === "shrinking-platforms" && platform.y < 432) platform.w *= 0.8;
@@ -662,6 +690,7 @@ export default function GameCanvas() {
           player.y = platform.y + platform.h; player.vy = 0;
         }
       }
+      for (const coin of stage.coins) { if (coin.collected) continue; const bob = Math.sin(elapsed * 6 + coin.x) * 3; ctx.fillStyle = "#e5b94f"; ctx.beginPath(); ctx.arc(coin.x, coin.y + bob, 13, 0, Math.PI * 2); ctx.fill(); drawText(ctx, "₦", coin.x, coin.y + bob + 1, 13, "#4c2b17", "center", "DM Mono"); }
       for (const hazard of stage.hazards) {
         if (hazard.kind === "falling") hazard.y = 155 + Math.abs(Math.sin(elapsed * 2 + (hazard.phase || 0))) * 125;
         if (hazard.kind === "axe") hazard.phase = (hazard.phase || 0) + dt * 4;
@@ -711,6 +740,7 @@ export default function GameCanvas() {
           key.collected = true; save.keys += 1; save.keyIds.push(key.id); if (stage.mechanic === "key-lock-betrayal") doorLockedByBetrayal = true; persist(save); music.blip(880, 0.12);
         }
       }
+      for (const coin of stage.coins) { if (!coin.collected && rectsOverlap(player, { x: coin.x - 14, y: coin.y - 18, w: 28, h: 36 })) { coin.collected = true; save.debt = Math.max(0, save.debt - 250); persist(save); music.blip(1040, 0.08); } }
       if (player.x > stage.exitX - 55 && player.x < stage.exitX + 55 && player.y + player.h > 300 && player.y < 385) {
         if ((stage.mechanic === "key-lock-betrayal" && doorLockedByBetrayal) || (!stage.keys[0]?.collected && !adminMode)) { adminToast = stage.mechanic === "key-lock-betrayal" ? "That key was the lock. Avoid it." : "Key needed to Japa!"; adminToastUntil = now + 1500; music.blip(180, 0.12); player.x = Math.max(0, stage.exitX - 80); }
         else clearLevel();
@@ -724,10 +754,12 @@ export default function GameCanvas() {
     const drawBackground = () => {
       const palettes = world === 0 ? ["#101316", "#1e2528", "#3a302c"] : world === 1 ? ["#190f15", "#451b27", "#762b32"] : world === 2 ? ["#111a25", "#26344a", "#4b2d4f"] : ["#171329", "#362650", "#5d3e77"];
       const grad = ctx.createLinearGradient(0, 0, 0, H); grad.addColorStop(0, palettes[0]); grad.addColorStop(0.55, palettes[1]); grad.addColorStop(1, palettes[2]); ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
-      ctx.globalAlpha = 0.18;
-      for (let i = 0; i < 18; i += 1) { const x = (i * 83 - cameraX * 0.18) % (W + 100); const y = 130 + ((i * 71) % 220); ctx.fillStyle = i % 2 ? "#9db5a1" : "#d7a26f"; ctx.fillRect(x, y, 28 + (i % 4) * 9, 3); ctx.fillRect(x + 9, y - 18, 3, 18); }
-      ctx.globalAlpha = 0.12; ctx.fillStyle = "#ffffff";
-      for (let y = 0; y < H; y += 6) ctx.fillRect(0, y, W, 1);
+      ctx.globalAlpha = 0.55; ctx.fillStyle = "#dce6d4";
+      for (let i = 0; i < 34; i += 1) { const x = (i * 97 - cameraX * 0.08) % (W + 120); const y = 34 + ((i * 43) % 150); ctx.fillRect(x, y, i % 3 === 0 ? 2 : 1, i % 4 === 0 ? 2 : 1); }
+      ctx.globalAlpha = 0.42; ctx.fillStyle = "#172126";
+      for (let i = 0; i < 14; i += 1) { const x = (i * 128 - cameraX * 0.16) % (W + 180); const h = 70 + (i % 5) * 18; ctx.fillRect(x, 360 - h, 92, h); ctx.fillStyle = i % 2 ? "#1d2b30" : "#172126"; }
+      ctx.globalAlpha = 0.72; ctx.fillStyle = "#0d1519";
+      for (let i = 0; i < 10; i += 1) { const x = (i * 164 - cameraX * 0.34) % (W + 210); ctx.fillRect(x, 380 - (i % 4) * 14, 120, 120); ctx.fillStyle = i % 2 ? "#101a1d" : "#0d1519"; }
       ctx.globalAlpha = 1;
     };
 
@@ -798,7 +830,7 @@ export default function GameCanvas() {
       ctx.fillStyle = "#123d2c"; ctx.fillRect(stage.exitX, 304, 58, 80); ctx.fillStyle = "#62d477"; ctx.fillRect(stage.exitX + 7, 311, 44, 73); ctx.fillStyle = "#dff6af"; ctx.fillRect(stage.exitX + 13, 320, 32, 51); ctx.fillStyle = "#1d4d34"; ctx.fillRect(stage.exitX + 37, 345, 4, 4); drawText(ctx, stage.keys[0]?.collected || adminMode ? "JAPA" : "LOCKED", stage.exitX + 29, 296, 10, stage.keys[0]?.collected || adminMode ? "#8ce49a" : "#f0c86b", "center", "DM Mono");
       // Player: detailed 32×32 pixel character, tinted only in shirt and shorts regions.
       const playerPose: "idle" | "run" | "jump" = !player.grounded ? "jump" : Math.abs(player.vx) > 40 ? "run" : "idle";
-      drawPixelBoy(ctx, player.x - 8, player.y - 7, 1, save.wardrobe, save.wardrobe.username, playerPose, elapsed);
+      drawPixelBoy(ctx, player.x - 8, player.y - 7, 1, { ...save.wardrobe, titleBadge: save.supporter ? "DEV SPONSOR" : save.wardrobe.titleBadge }, save.wardrobe.username, playerPose, elapsed);
       if (onlineMode) {
         for (const remote of remotePlayers) {
           ctx.globalAlpha = 0.58; drawPixelBoy(ctx, remote.x - 8, remote.y - 7, 1, DEFAULT_WARDROBE, remote.name, remote.jumping ? "jump" : "idle", elapsed); ctx.globalAlpha = 1;
@@ -841,7 +873,7 @@ export default function GameCanvas() {
       ctx.fillStyle = "#71be79"; ctx.fillRect(58, 66, 8, 172); ctx.fillStyle = "#f2d374"; ctx.fillRect(58, 246, 8, 70);
       drawText(ctx, "NNL // 001", 90, 74, 13, "#8bcf8c", "left", "DM Mono"); drawText(ctx, "NAIJA", 90, 136, 64, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "NORMAL", 90, 194, 64, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "LEVEL", 90, 252, 64, "#73c27c", "left", "Space Grotesk");
       drawText(ctx, "A pixel rage platformer about surviving the shege.", 92, 288, 14, "#c1beb1", "left", "DM Mono"); drawText(ctx, "Fuck around and Sabi am", 92, 307, 13, "#f2d374", "left", "DM Mono");
-      drawButton(ctx, "OFFLINE MODE  //  CLASSIC STRUGGLE", 90, 322, 340, 50, "#72c67f"); drawButton(ctx, "ADJUST YOUR WAHALA", 90, 382, 300, 44, "#c7a657", true); drawButton(ctx, "PEOPLE WEY HELP BUILD THIS SHEGE", 90, 436, 300, 44, "#73858b", true); drawButton(ctx, "ONLINE ARENA  //  50-PLAYER SABOTAGE", 560, 322, 320, 50, "#e65c4b");
+      drawButton(ctx, "OFFLINE MODE  //  CLASSIC STRUGGLE", 90, 322, 340, 50, "#72c67f"); drawButton(ctx, "ADJUST YOUR WAHALA", 90, 382, 300, 44, "#c7a657", true); drawButton(ctx, "PEOPLE WEY HELP BUILD THIS SHEGE", 90, 436, 300, 44, "#73858b", true); drawButton(ctx, "ONLINE ARENA  //  50-PLAYER SABOTAGE", 560, 322, 320, 50, "#e65c4b"); drawButton(ctx, "SUPPORT THE DEVELOPER", 690, 470, 190, 38, "#f0c86b", true);
       ctx.fillStyle = "rgba(7,8,10,.82)"; ctx.fillRect(690, 390, 190, 74); drawText(ctx, "CURRENT GBese", 710, 410, 11, "#8e978c", "left", "DM Mono"); drawText(ctx, `₦${save.debt.toLocaleString("en-NG")}`, 710, 440, 24, "#f3cc65", "left", "DM Mono"); drawText(ctx, "tap anywhere to wake audio", 90, 504, 11, "#7c877e", "left", "DM Mono");
     };
     const drawArena = () => {
@@ -878,7 +910,7 @@ export default function GameCanvas() {
       drawText(ctx, adminMode ? "ADMIN MODE · ALL 40 ROOMS AVAILABLE" : `PROGRESS ${save.progress[world] || 0}/10`, 72, 405, 12, adminMode ? "#cbb7ff" : "#f3cc65", "left", "DM Mono");
       drawButton(ctx, "BACK TO WORLDS", 72, 446, 205, 42, "#73858b", true);
     };
-    const drawOptions = () => { drawOverlay(); drawText(ctx, "ADJUST YOUR WAHALA", 80, 80, 32, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "the controls are already stressful enough", 82, 113, 13, "#8e978c", "left", "DM Mono"); drawButton(ctx, `MUSIC  //  ${MUSIC_TRACKS[musicTrack]}`, 82, 168, 420, 52, musicTrack === 0 ? "#73858b" : "#72c67f"); drawButton(ctx, `TOUCH CONTROLS  //  ${controlScale.toFixed(1)}x ${controlScale === 0.8 ? "SMALL" : controlScale === 1 ? "MEDIUM" : "LARGE"}`, 82, 236, 420, 52, "#c7a657"); drawButton(ctx, `STREAMER MODE  //  ${streamerEnabled ? "ON" : "OFF"}`, 82, 304, 420, 52, streamerEnabled ? "#72c67f" : "#73858b"); drawButton(ctx, "FLEX WARDROBE  //  OUTFIT + USERNAME", 82, 372, 420, 42, "#b78cff"); drawButton(ctx, "WALLET / BANK  //  $GU + PREMIUM", 82, 426, 420, 42, "#f0c86b"); drawButton(ctx, "BACK TO MENU", 82, 478, 188, 42, "#73858b", true); };
+    const drawOptions = () => { drawOverlay(); drawText(ctx, "ADJUST YOUR WAHALA", 80, 80, 32, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "the controls are already stressful enough", 82, 113, 13, "#8e978c", "left", "DM Mono"); drawButton(ctx, `MUSIC  //  ${MUSIC_TRACKS[musicTrack]}`, 82, 168, 420, 52, musicTrack === 0 ? "#73858b" : "#72c67f"); drawButton(ctx, `TOUCH CONTROLS  //  ${controlScale.toFixed(1)}x ${controlScale === 0.8 ? "SMALL" : controlScale === 1 ? "MEDIUM" : "LARGE"}`, 82, 236, 420, 52, "#c7a657"); drawButton(ctx, `STREAMER MODE  //  ${streamerEnabled ? "ON" : "OFF"}`, 82, 304, 420, 52, streamerEnabled ? "#72c67f" : "#73858b"); drawButton(ctx, "FLEX WARDROBE  //  OUTFIT + USERNAME", 82, 372, 420, 42, "#b78cff"); drawButton(ctx, "WALLET / BANK  //  $GU + PREMIUM", 82, 426, 420, 42, "#f0c86b"); drawButton(ctx, "SUPPORT THE DEVELOPER", 330, 478, 240, 42, "#f0c86b", true); drawButton(ctx, "BACK TO MENU", 82, 478, 188, 42, "#73858b", true); };
     const drawWardrobe = () => {
       const activeTab: "A" | "B" = wardrobeTab;
       const bottomBase = String(activeTab) === "B" ? 316 : 282;
@@ -888,10 +920,10 @@ export default function GameCanvas() {
       const drawItem = (item: WardrobeItem, index: number, y: number) => { const x = 60 + (index % 4) * 145; const yy = y + Math.floor(index / 4) * 48; const unlocked = isUnlocked(item, save.wardrobe); const selected = item.id === save.wardrobe.topId || item.id === save.wardrobe.bottomId; ctx.fillStyle = selected ? "rgba(57,87,62,.95)" : "rgba(18,22,24,.95)"; ctx.fillRect(x, yy, 132, 39); ctx.strokeStyle = unlocked ? item.color : "#555d58"; ctx.strokeRect(x + 1, yy + 1, 130, 37); ctx.fillStyle = item.color; ctx.fillRect(x + 8, yy + 11, 16, 16); drawText(ctx, unlocked ? item.label.replace(" Shorts", "") : `₦${item.price}`, x + 31, yy + 13, 9, unlocked ? "#f7f1e6" : "#8b938b", "left", "DM Mono"); drawText(ctx, selected ? "EQUIPPED" : unlocked ? "EQUIP" : "UNLOCK", x + 31, yy + 28, 8, unlocked ? item.color : "#8b938b", "left", "DM Mono"); };
       drawText(ctx, "TOPS", 60, 148, 10, "#a4ada2", "left", "DM Mono"); items.tops.forEach((item, index) => drawItem(item, index, 158)); drawText(ctx, "BOTTOMS", 60, bottomBase - 10, 10, "#a4ada2", "left", "DM Mono"); items.bottoms.forEach((item, index) => drawItem(item, index, bottomBase));
       ctx.fillStyle = "rgba(19,22,24,.96)"; ctx.fillRect(675, 112, 225, 250); ctx.strokeStyle = String(activeTab) === "B" ? "#f0c86b" : "#72c67f"; ctx.strokeRect(676, 113, 223, 248); drawText(ctx, "LIVE FIT CHECK", 787, 136, 11, "#aeb6a9", "center", "DM Mono"); drawPixelBoy(ctx, 700, 165, 5, save.wardrobe); drawText(ctx, save.wardrobe.titleBadge ? `[${save.wardrobe.titleBadge}] ${save.wardrobe.username}` : save.wardrobe.username, 787, 300, 11, save.wardrobe.nameGlow ? "#ffe7a0" : "#f7f1e6", "center", "DM Mono");
-      drawButton(ctx, `TITLE BADGE  //  ${save.wardrobe.titleBadge || (save.wardrobe.titleBadgeUnlocked ? "NONE" : "200 $GU")}`, 675, 330, 225, 32, save.wardrobe.titleBadgeUnlocked ? "#72c67f" : "#f0c86b", true); drawButton(ctx, "EDIT GAMER USERNAME", 675, 375, 225, 38, "#72c67f", true); drawButton(ctx, `GOLDEN NAME GLOW  //  ${save.wardrobe.nameGlow ? "ON" : "200 $GU"}`, 675, 420, 225, 38, save.wardrobe.nameGlow ? "#f0c86b" : "#73858b", true); drawButton(ctx, save.wardrobe.bundleUnlocked ? "OGA BOSS BUNDLE  //  UNLOCKED" : "OGA BOSS BUNDLE  //  2,000 $GU", 675, 465, 225, 38, "#b78cff", true); drawButton(ctx, `PAY WITH  //  ${paymentProvider === "flutterwave" ? "FLUTTERWAVE" : "PAYSTACK"}`, 675, 505, 225, 28, paymentProvider === "flutterwave" ? "#f0c86b" : "#42b883", true); drawText(ctx, `GBESE  ₦${save.debt.toLocaleString("en-NG")}   $GU  ${save.gu}`, 60, 485, 11, "#f3cc65", "left", "DM Mono"); topUpPacks.forEach((pack, index) => drawButton(ctx, `${pack.label}  ₦${pack.naira}`, 60 + index * 145, 505, 135, 28, "#5c9dd1", true));
+      drawButton(ctx, `TITLE BADGE  //  ${save.wardrobe.titleBadge || (save.wardrobe.titleBadgeUnlocked ? "NONE" : "200 $GU")}`, 675, 330, 225, 32, save.wardrobe.titleBadgeUnlocked ? "#72c67f" : "#f0c86b", true); drawButton(ctx, "EDIT GAMER USERNAME", 675, 375, 225, 38, "#72c67f", true); drawButton(ctx, `GOLDEN NAME GLOW  //  ${save.wardrobe.nameGlow ? "ON" : "200 $GU"}`, 675, 420, 225, 38, save.wardrobe.nameGlow ? "#f0c86b" : "#73858b", true); drawButton(ctx, save.wardrobe.bundleUnlocked ? "OGA BOSS BUNDLE  //  UNLOCKED" : "OGA BOSS BUNDLE  //  2,000 $GU", 675, 465, 225, 38, "#b78cff", true); drawText(ctx, `$GU BALANCE  ${save.gu}  ·  cosmetics only`, 60, 485, 11, "#72d88b", "left", "DM Mono");
     };
     const drawCredits = () => { drawOverlay(); drawText(ctx, "DEVELOPER CREDITS", 72, 52, 30, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Executive Director & Lead Architect: GBODOMI", 72, 88, 14, "#72c67f", "left", "DM Mono"); drawText(ctx, "Studio: AZRA GAMES", 72, 112, 14, "#f0c86b", "left", "DM Mono"); drawText(ctx, "A special message to the players:", 72, 152, 13, "#f7f1e6", "left", "DM Mono"); drawText(ctx, "If you are reading this screen, it means two things:", 72, 178, 12, "#c6cbc3", "left", "DM Mono"); drawText(ctx, "either you are a certified legend who survived all 40 levels", 72, 198, 12, "#c6cbc3", "left", "DM Mono"); drawText(ctx, "of pure suffering, or you came looking for the maker.", 72, 218, 12, "#c6cbc3", "left", "DM Mono"); drawText(ctx, "Every invisible spike, telepathic trap door, and fake platform", 72, 252, 12, "#c6cbc3", "left", "DM Mono"); drawText(ctx, "was lovingly hand-coded by GBODOMI to test your stability.", 72, 272, 12, "#c6cbc3", "left", "DM Mono"); drawText(ctx, "If your eye is turning red or you scream GOD ABEG:", 72, 306, 12, "#f0c86b", "left", "DM Mono"); drawText(ctx, "WE WARNED YOU.", 72, 326, 14, "#e65c4b", "left", "DM Mono"); drawText(ctx, "AZRA GAMES takes zero responsibility for broken screen protectors,", 72, 360, 11, "#c6cbc3", "left", "DM Mono"); drawText(ctx, "cracked phone cases, high blood pressure, or village people attacks.", 72, 378, 11, "#c6cbc3", "left", "DM Mono"); drawText(ctx, "You don see Shege, but you still dey move. Respect!", 72, 414, 13, "#72c67f", "left", "DM Mono"); drawButton(ctx, "BACK TO MENU", 72, 468, 205, 42, "#73858b", true); };
-    const drawWallet = () => { drawOverlay(); drawText(ctx, "WALLET / BANK", 72, 64, 34, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Manage Gbese, buy $GU, and unlock premium tiers", 74, 96, 13, "#9fa89d", "left", "DM Mono"); ctx.fillStyle = "rgba(20,24,24,.96)"; ctx.fillRect(74, 125, 812, 110); ctx.strokeStyle = "#f0c86b"; ctx.strokeRect(75, 126, 810, 108); drawText(ctx, `GBESE BALANCE   ₦${save.debt.toLocaleString("en-NG")}`, 102, 165, 20, "#f0c86b", "left", "DM Mono"); drawText(ctx, `$GU BALANCE   ${save.gu}`, 102, 198, 20, "#72d88b", "left", "DM Mono"); drawButton(ctx, `PAY WITH  //  ${paymentProvider === "flutterwave" ? "FLUTTERWAVE" : "PAYSTACK"}`, 625, 150, 230, 48, paymentProvider === "flutterwave" ? "#f0c86b" : "#42b883", true); drawText(ctx, "TOP UP $GU", 74, 270, 12, "#a4ada2", "left", "DM Mono"); topUpPacks.forEach((pack, index) => drawButton(ctx, `${pack.label}  ₦${pack.naira}`, 60 + index * 145, 290, 135, 45, "#5c9dd1", true)); drawButton(ctx, save.wardrobe.bundleUnlocked ? "NEPO BABY BUNDLE  //  UNLOCKED" : "UNLOCK NEPO BABY BUNDLE  //  2,000 $GU", 300, 380, 360, 52, "#b78cff", true); drawText(ctx, "Premium purchases are verified server-side before balance credit.", 300, 456, 12, "#9fa89d", "left", "DM Mono"); drawButton(ctx, "BACK TO MENU", 72, 480, 205, 42, "#73858b", true); };
+    const drawWallet = () => { drawOverlay(); drawText(ctx, "WALLET / BANK", 72, 64, 34, "#f7f1e6", "left", "Space Grotesk"); drawText(ctx, "Manage Gbese, buy $GU, and unlock premium tiers", 74, 96, 13, "#9fa89d", "left", "DM Mono"); ctx.fillStyle = "rgba(20,24,24,.96)"; ctx.fillRect(74, 125, 812, 110); ctx.strokeStyle = "#f0c86b"; ctx.strokeRect(75, 126, 810, 108); drawText(ctx, `GBESE BALANCE   ₦${save.debt.toLocaleString("en-NG")}`, 102, 165, 20, "#f0c86b", "left", "DM Mono"); drawText(ctx, `$GU BALANCE   ${save.gu}`, 102, 198, 20, "#72d88b", "left", "DM Mono"); drawButton(ctx, `PAY WITH  //  ${paymentProvider === "flutterwave" ? "FLUTTERWAVE" : "PAYSTACK"}`, 625, 150, 230, 48, paymentProvider === "flutterwave" ? "#f0c86b" : "#42b883", true); drawText(ctx, "TOP UP $GU", 74, 270, 12, "#a4ada2", "left", "DM Mono"); topUpPacks.forEach((pack, index) => drawButton(ctx, `${pack.label}  ₦${pack.naira}`, 60 + index * 145, 290, 135, 45, "#5c9dd1", true)); drawButton(ctx, save.wardrobe.bundleUnlocked ? "NEPO BABY BUNDLE  //  UNLOCKED" : "UNLOCK NEPO BABY BUNDLE  //  2,000 $GU", 300, 380, 360, 52, "#b78cff", true); drawText(ctx, "Premium purchases are verified server-side before balance credit.", 300, 456, 12, "#9fa89d", "left", "DM Mono"); drawButton(ctx, "SUPPORT THE DEVELOPER", 340, 480, 260, 42, "#f0c86b", true); drawButton(ctx, "BACK TO MENU", 72, 480, 205, 42, "#73858b", true); };
     const drawPause = () => { drawOverlay(); drawText(ctx, "HOLD ON SMALL", W / 2, 95, 34, "#f7f1e6", "center", "Space Grotesk"); drawText(ctx, "the shege is still here when you return", W / 2, 130, 13, "#9aa297", "center", "DM Mono"); drawButton(ctx, "WE MOVE", 335, 170, 290, 48, WORLD_COLORS[world]); drawButton(ctx, "TRY THIS SHEGE AGAIN", 335, 235, 290, 48, "#c7a657"); if (adminMode && !onlineMode) drawButton(ctx, "SKIP LEVEL  //  ADMIN MODE", 335, 300, 290, 48, "#b78cff"); drawButton(ctx, "JAPA FROM THE GAME", 335, adminMode && !onlineMode ? 365 : 300, 290, 48, "#73858b"); if (adminMode && !onlineMode) drawText(ctx, "OFFLINE GOD MODE ENABLED", W / 2, 445, 11, "#b78cff", "center", "DM Mono"); };
     const drawDead = () => { drawWorld(performance.now()); ctx.fillStyle = "rgba(71,20,26,.72)"; ctx.fillRect(0, 0, W, H); drawText(ctx, deathMessage, W / 2, 208, 26, "#fff0dc", "center", "Space Grotesk"); drawText(ctx, `GBESE +₦${deathPenalty}`, W / 2, 250, 18, "#ffbc6b", "center", "DM Mono"); drawText(ctx, "respawning in a blink...", W / 2, 300, 12, "#efb7a4", "center", "DM Mono"); if (onlineMode) drawButton(ctx, "SPECTATOR GHOST POWERS", 335, 350, 290, 44, "#b78cff", true); drawButton(ctx, "SHARE YOUR WAHALA", 335, onlineMode ? 405 : 355, 290, 44, "#72c67f", true); };
     const drawSpectator = () => { drawOverlay(); drawText(ctx, "GHOST MODE", W / 2, 75, 36, "#b78cff", "center", "Space Grotesk"); drawText(ctx, "you are eliminated — spend 100 Ghost Energy to cause minor wahala", W / 2, 112, 12, "#b9aeca", "center", "DM Mono"); drawText(ctx, `GHOST ENERGY  ${save.ghostEnergy}`, W / 2, 145, 16, "#f0c86b", "center", "DM Mono"); drawButton(ctx, "UP NEPA  ·  100 GHOST", 330, 175, 300, 44, "#f0c86b", true); drawButton(ctx, "VILLAGE PEOPLE  ·  100 GHOST", 330, 245, 300, 44, "#72c67f", true); drawButton(ctx, "GOD ABEG SPIKES  ·  100 GHOST", 330, 315, 300, 44, "#e65c4b", true); drawText(ctx, leaderboard.slice(0, 10).map((entry, index) => `${index + 1}. ${entry.name}  ₦${entry.gbese}`).join("   "), W / 2, 395, 10, "#d4d9d1", "center", "DM Mono"); drawButton(ctx, "JAPA FROM SPECTATOR", 330, 440, 300, 42, "#73858b", true); };
@@ -899,7 +931,7 @@ export default function GameCanvas() {
 
     const draw = (now: number) => {
       ctx.save(); ctx.setTransform(canvas.width / W, 0, 0, canvas.height / H, 0, 0); ctx.clearRect(0, 0, W, H);
-      if (screen === "title") drawTitle(); else if (screen === "worlds") drawWorlds(); else if (screen === "levels") drawLevels(); else if (screen === "wardrobe") drawWardrobe(); else if (screen === "wallet") drawWallet(); else if (screen === "arena") drawArena(); else if (screen === "options") drawOptions(); else if (screen === "credits") drawCredits(); else if (screen === "playing") drawWorld(now); else if (screen === "paused") { drawWorld(now); drawPause(); } else if (screen === "dead") drawDead(); else if (screen === "spectator") drawSpectator(); else if (screen === "clear") drawClear();
+      if (screen === "title") drawTitle(); else if (screen === "worlds") drawWorlds(); else if (screen === "levels") drawLevels(); else if (screen === "wardrobe") drawWardrobe(); else if (screen === "wallet") drawWallet(); else if (screen === "support") drawSupport(); else if (screen === "arena") drawArena(); else if (screen === "options") drawOptions(); else if (screen === "credits") drawCredits(); else if (screen === "playing") drawWorld(now); else if (screen === "paused") { drawWorld(now); drawPause(); } else if (screen === "dead") drawDead(); else if (screen === "spectator") drawSpectator(); else if (screen === "clear") drawClear();
       if (clearMessage && now < clearUntil) { ctx.fillStyle = "rgba(18,37,28,.96)"; ctx.fillRect(160, 72, 640, 48); ctx.strokeStyle = "#72c67f"; ctx.lineWidth = 2; ctx.strokeRect(161, 73, 638, 46); drawText(ctx, clearMessage, W / 2, 96, 14, "#d8f6b4", "center", "DM Mono"); }
       if (adminToast && now < adminToastUntil) { ctx.fillStyle = "rgba(19,13,31,.96)"; ctx.fillRect(170, 24, 620, 48); ctx.strokeStyle = "#b78cff"; ctx.lineWidth = 2; ctx.strokeRect(171, 25, 618, 46); drawText(ctx, adminToast, W / 2, 48, 15, "#f0ddff", "center", "DM Mono"); }
       ctx.restore();

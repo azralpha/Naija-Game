@@ -1,6 +1,6 @@
 export type WorldIndex = 0 | 1 | 2 | 3;
 export type LevelHazardKind = "spike" | "disappear" | "movingWall" | "lateSpike" | "reverse" | "gravityFlip" | "multi" | "teleporter" | "jumpPad" | "safetyTile" | "glue" | "boulder" | "shoker" | "fakeKey" | "fakeCoin" | "mudSweep";
-export type LevelPlatform = { x: number; y: number; w: number; h: number; color: string };
+export type LevelPlatform = { x: number; y: number; w: number; h: number; color: string; kind?: "solid" | "one-way" | "moving"; waypoints?: Array<{ x: number; y: number }> };
 export type LevelHazard = { kind: LevelHazardKind; x: number; y: number; w: number; h: number; penalty: number; label: string; phase?: number };
 export const RAGE_MECHANICS = [
   "fake-solid-floor", "sinking-ledges", "awoof-gravity-coin", "door-teleport-left", "fade-platform", "permanent-reverse", "glue-lock", "walk-only-bridge", "fake-door-pair", "apex-disintegration",
@@ -98,7 +98,6 @@ function tileRowsToDefinition(world: WorldIndex, level: number, rows: string[]):
   if (world >= 1 && level % 2 === 0) hazards.push({ kind: "boulder", x: 520, y: 250, w: 30, h: 30, penalty: 220, label: "SAPA BOULDER" });
   if (world >= 2 && level % 3 === 1) hazards.push({ kind: "shoker", x: 650, y: 300, w: 62, h: 150, penalty: 260, label: "SHOKER TUNNEL" });
   if (world >= 1 && level % 4 === 0) hazards.push({ kind: "fakeKey", x: 560, y: 350, w: 30, h: 34, penalty: 180, label: "FAKE JAPA KEY" });
-  if (world >= 1 && level % 5 === 0) hazards.push({ kind: "fakeCoin", x: 760, y: 348, w: 28, h: 28, penalty: 2000, label: "FAKE COIN DROP" });
   if (world === 2 && level % 2 === 1) hazards.push({ kind: "mudSweep", x: 420, y: 430, w: 260, h: 20, penalty: 190, label: "TRENCHES MUD SWEEP" });
   // The door is intentionally not always on the same tile even when the room ends.
   const mechanic = RAGE_MECHANICS[world * 10 + level - 1];

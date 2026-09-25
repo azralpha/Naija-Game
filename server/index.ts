@@ -2,7 +2,8 @@ import express from "express";
 import { createServer } from "http";
 import path from "path";
 import { fileURLToPath } from "url";
-import { randomUUID } from "crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "crypto";
+import { COSMETIC_COSTS, GU_PACKAGES, isTipPackage } from "./economy";
 import { Server as SocketIOServer, Socket } from "socket.io";
 
 type TrapType = "sapa_floor" | "shege_spike" | "awoof_platform";
@@ -20,6 +21,15 @@ type PlayerState = {
 };
 type Trap = { id: string; ownerId: string; x: number; y: number; trapType: TrapType; expiresAt: number };
 type Room = { id: string; players: Map<string, PlayerState>; traps: Map<string, Trap> };
+type Profile = { userId: string; username: string; guBalance: number; gbeseBalance: number; equippedSkinTop: string; equippedSkinBottom: string; supporter: boolean; inventory: Set<string> };
+type Transaction = { reference: string; gateway: "paystack" | "flutterwave"; userId: string; amountPaidNgn: number; guAwarded: number; isTip: boolean; status: "pending" | "success" | "failed" };
+const profiles = new Map<string, Profile>();
+const transactions = new Map<string, Transaction>();
+const rawBody = Symbol("rawBody");
+function profileFor(userId: string, username = "Sapa Soldier") { let profile = profiles.get(userId); if (!profile) { profile = { userId, username, guBalance: 0, gbeseBalance: 0, equippedSkinTop: "default", equippedSkinBottom: "default", supporter: false, inventory: new Set() }; profiles.set(userId, profile); } return profile; }
+function safeSignature(value: unknown, secret: string, signature: unknown) { if (typeof signature !== "string" || !secret) return false; const expected = createHmac("sha512", secret).update(typeof value === "string" ? value : JSON.stringify(value)).digest("hex"); const a = Buffer.from(expected); const b = Buffer.from(signature); return a.length === b.length && timingSafeEqual(a, b); }
+function userIdFrom(req: express.Request) { return String(req.header("x-user-id") || req.body?.user_id || req.body?.metadata?.user_id || "guest").slice(0, 80); }
+function transactionPayload(profile: Profile) { return { userId: profile.userId, username: profile.username, guBalance: profile.guBalance, gbeseBalance: profile.gbeseBalance, supporter: profile.supporter, inventory: Array.from(profile.inventory), equippedSkinTop: profile.equippedSkinTop, equippedSkinBottom: profile.equippedSkinBottom }; }
 
 const rooms = new Map<string, Room>();
 const watchers = new Map<string, { stop: () => void }>();
@@ -98,7 +108,7 @@ function startYouTubeWatcher(io: SocketIOServer, roomId: string, liveChatId: str
 
 async function startServer() {
   const app = express();
-  app.use(express.json({ limit: "32kb" }));
+  app.use(express.json({ limit: "64kb", verify: (req, _res, buffer) => { (req as express.Request & { rawBody?: string }).rawBody = buffer.toString("utf8"); } }));
   const server = createServer(app);
   const io = new SocketIOServer(server, { cors: { origin: true, credentials: true }, transports: ["websocket", "polling"] });
   const __filename = fileURLToPath(import.meta.url);
@@ -113,27 +123,33 @@ async function startServer() {
     return res.json({ ok, roomId, command });
   });
 
-  app.post("/api/payments/verify", async (req, res) => {
-    const provider = req.body?.provider === "paystack" ? "paystack" : req.body?.provider === "flutterwave" ? "flutterwave" : "";
-    const reference = typeof req.body?.reference === "string" ? req.body.reference.trim() : "";
-    const amount = Number(req.body?.amount);
-    if (!provider || !reference || !Number.isFinite(amount) || amount <= 0) return res.status(400).json({ ok: false, error: "provider, reference, and amount are required" });
-    try {
-      if (provider === "paystack") {
-        if (!process.env.PAYSTACK_SECRET_KEY) return res.status(503).json({ ok: false, error: "Paystack verification is not configured" });
-        const response = await fetch(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, { headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` } });
-        const payload = await response.json() as { status?: boolean; data?: { status?: string; amount?: number; currency?: string; reference?: string } };
-        const verified = response.ok && payload.status === true && payload.data?.status === "success" && payload.data.currency === "NGN" && payload.data.amount === Math.round(amount * 100);
-        return res.status(verified ? 200 : 402).json({ ok: verified, provider, reference });
-      }
-      if (!process.env.FLUTTERWAVE_SECRET_KEY) return res.status(503).json({ ok: false, error: "Flutterwave verification is not configured" });
-      const response = await fetch(`https://api.flutterwave.com/v3/transactions/${encodeURIComponent(reference)}/verify`, { headers: { Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}` } });
-      const payload = await response.json() as { status?: string; data?: { status?: string; amount?: number; currency?: string; id?: number } };
-      const verified = response.ok && payload.status === "success" && payload.data?.status === "successful" && payload.data.currency === "NGN" && Number(payload.data.amount) >= amount;
-      return res.status(verified ? 200 : 402).json({ ok: verified, provider, reference });
-    } catch {
-      return res.status(502).json({ ok: false, error: "Payment verification provider unavailable" });
-    }
+  app.get("/api/player/sync", (req, res) => { const profile = profileFor(userIdFrom(req)); return res.json({ ok: true, profile: transactionPayload(profile) }); });
+  app.post("/api/shop/buy", (req, res) => { const itemId = typeof req.body?.item_id === "string" ? req.body.item_id : ""; const cost = COSMETIC_COSTS[itemId]; const profile = profileFor(userIdFrom(req)); if (!cost) return res.status(400).json({ ok: false, error: "UNKNOWN_ITEM" }); if (profile.inventory.has(itemId)) return res.json({ ok: true, ...transactionPayload(profile) }); if (profile.guBalance < cost) return res.status(402).json({ ok: false, error: "INSUFFICIENT_GU", guBalance: profile.guBalance }); profile.guBalance -= cost; profile.inventory.add(itemId); return res.json({ ok: true, ...transactionPayload(profile) }); });
+  app.post("/api/player/update-gbese", (req, res) => { const profile = profileFor(userIdFrom(req)); const delta = Number(req.body?.delta); if (!Number.isFinite(delta)) return res.status(400).json({ ok: false, error: "delta is required" }); profile.gbeseBalance = Math.max(0, Math.round(profile.gbeseBalance + delta)); return res.json({ ok: true, ...transactionPayload(profile) }); });
+  app.post("/api/developer/tip-intent", (req, res) => { const packageId = typeof req.body?.package_id === "string" ? req.body.package_id : ""; const pack = (GU_PACKAGES as Record<string, { amountNgn: number; tip?: boolean }>)[packageId]; if (!pack?.tip) return res.status(400).json({ ok: false, error: "UNKNOWN_TIP" }); const reference = `tip-${randomUUID()}`; transactions.set(reference, { reference, gateway: "paystack", userId: userIdFrom(req), amountPaidNgn: pack.amountNgn, guAwarded: 0, isTip: true, status: "pending" }); return res.json({ ok: true, reference, amountNgn: pack.amountNgn }); });
+
+  app.post("/api/paystack/webhook", async (req, res) => {
+    const raw = (req as express.Request & { rawBody?: string }).rawBody || JSON.stringify(req.body);
+    if (!safeSignature(raw, process.env.PAYSTACK_SECRET_KEY || "", req.header("x-paystack-signature"))) return res.status(401).json({ ok: false, error: "INVALID_SIGNATURE" });
+    if (req.body?.event !== "charge.success") return res.json({ ok: true, ignored: true });
+    const data = req.body?.data || {}; const reference = String(data.reference || ""); const metadata = data.metadata || {}; const packageId = String(metadata.gu_package_id || ""); const pack = (GU_PACKAGES as Record<string, { amountNgn: number; gu?: number; tip?: boolean }>)[packageId]; if (!reference || !pack) return res.status(400).json({ ok: false, error: "INVALID_PACKAGE" });
+    if (transactions.get(reference)?.status === "success") return res.json({ ok: true, duplicate: true });
+    if (!process.env.PAYSTACK_SECRET_KEY) return res.status(503).json({ ok: false, error: "PAYSTACK_NOT_CONFIGURED" });
+    const verification = await fetch(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, { headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` } }); const verified = await verification.json() as { status?: boolean; data?: { status?: string; amount?: number; currency?: string; reference?: string } };
+    if (!verification.ok || verified.status !== true || verified.data?.status !== "success" || verified.data.currency !== "NGN" || verified.data.amount !== pack.amountNgn * 100) return res.status(402).json({ ok: false, error: "VERIFICATION_FAILED" });
+    const profile = profileFor(String(metadata.user_id || "guest")); const transaction: Transaction = { reference, gateway: "paystack", userId: profile.userId, amountPaidNgn: pack.amountNgn, guAwarded: pack.gu || 0, isTip: Boolean(pack.tip), status: "success" }; transactions.set(reference, transaction); if (pack.tip) profile.supporter = true; else profile.guBalance += pack.gu || 0; return res.json({ ok: true, ...transactionPayload(profile) });
+  });
+
+  app.post("/api/flutterwave/webhook", async (req, res) => {
+    const secret = process.env.FLUTTERWAVE_SECRET_HASH || process.env.FLUTTERWAVE_SECRET_KEY || "";
+    if (!safeSignature((req as express.Request & { rawBody?: string }).rawBody || JSON.stringify(req.body), secret, req.header("verif-hash"))) return res.status(401).json({ ok: false, error: "INVALID_SIGNATURE" });
+    const event = req.body?.event; const data = req.body?.data || {}; if (event !== "charge.completed" || data.status !== "successful") return res.json({ ok: true, ignored: true });
+    const reference = String(data.tx_ref || data.id || ""); const packageId = String(data.meta?.find?.((entry: { metaname?: string }) => entry.metaname === "gu_package_id")?.metavalue || data.meta?.gu_package_id || ""); const pack = (GU_PACKAGES as Record<string, { amountNgn: number; gu?: number; tip?: boolean }>)[packageId]; if (!reference || !pack) return res.status(400).json({ ok: false, error: "INVALID_PACKAGE" });
+    if (transactions.get(reference)?.status === "success") return res.json({ ok: true, duplicate: true });
+    if (!process.env.FLUTTERWAVE_SECRET_KEY) return res.status(503).json({ ok: false, error: "FLUTTERWAVE_NOT_CONFIGURED" });
+    const verification = await fetch(`https://api.flutterwave.com/v3/transactions/${encodeURIComponent(String(data.id))}/verify`, { headers: { Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}` } }); const verified = await verification.json() as { status?: string; data?: { status?: string; amount?: number; currency?: string; tx_ref?: string } };
+    if (!verification.ok || verified.status !== "success" || verified.data?.status !== "successful" || verified.data.currency !== "NGN" || Number(verified.data.amount) < pack.amountNgn || verified.data.tx_ref !== reference) return res.status(402).json({ ok: false, error: "VERIFICATION_FAILED" });
+    const profile = profileFor(String(data.meta?.user_id || "guest")); const transaction: Transaction = { reference, gateway: "flutterwave", userId: profile.userId, amountPaidNgn: pack.amountNgn, guAwarded: pack.gu || 0, isTip: Boolean(pack.tip), status: "success" }; transactions.set(reference, transaction); if (pack.tip) profile.supporter = true; else profile.guBalance += pack.gu || 0; return res.json({ ok: true, ...transactionPayload(profile) });
   });
 
   app.post("/api/streamer/connect", async (req, res) => {
