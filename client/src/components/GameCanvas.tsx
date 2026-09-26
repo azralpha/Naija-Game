@@ -5,7 +5,7 @@ import { DEFAULT_WARDROBE, GROUP_A_BOTTOMS, GROUP_A_TOPS, GROUP_B_BOTTOMS, GROUP
 
 type Screen = "title" | "worlds" | "levels" | "wardrobe" | "wallet" | "support" | "arena" | "options" | "credits" | "playing" | "paused" | "dead" | "spectator" | "clear";
 type PaymentProvider = "flutterwave" | "paystack";
-type Platform = { x: number; y: number; w: number; h: number; vanish?: boolean; color?: string; kind?: "solid" | "one-way" | "moving"; waypoints?: Array<{ x: number; y: number }> };
+type Platform = { x: number; y: number; w: number; h: number; vanish?: boolean; color?: string; kind?: "solid" | "one-way" | "moving"; waypoints?: Array<{ x: number; y: number }>; slope?: "left" | "right" };
 type HazardKind =
   | "spike"
   | "falling"
@@ -56,6 +56,7 @@ type Stage = {
   coins: GbCoin[];
   exitX: number;
   spawn: { x: number; y: number };
+  height: number;
 };
 type Player = { x: number; y: number; w: number; h: number; vx: number; vy: number; grounded: boolean; coyote: number; jumpsRemaining: number };
 
@@ -148,6 +149,7 @@ function stageFor(world: WorldIndex, level: number, save: SaveData): Stage {
     coins,
     exitX: definition.exitX,
     spawn: definition.spawn,
+    height: definition.height || H,
   };
 }
 
@@ -322,6 +324,7 @@ export default function GameCanvas() {
     let stage = stageFor(world, currentLevel, save);
     let player = createPlayer(stage);
     let cameraX = 0;
+    let cameraY = 0;
     let last = performance.now();
     let raf = 0;
     let elapsed = 0;
@@ -441,9 +444,13 @@ export default function GameCanvas() {
     const registerTitleTap = (now: number) => {
       titleTapTimes.push(now);
       while (titleTapTimes.length && now - titleTapTimes[0] > 1500) titleTapTimes.shift();
-      if (titleTapTimes.length >= 5) {
+      if (titleTapTimes.length === 15) {
         titleTapTimes.length = 0;
         enableAdminMode();
+        sessionStorage.setItem("nnl-editor-admin", "true");
+        adminToast = "Admin Access Unlocked - Welcome Oga Boss";
+        adminToastUntil = performance.now() + 1800;
+        window.setTimeout(() => window.location.assign("/editor"), 650);
       }
     };
     const onStreamerEvent = (event: StreamerEvent) => {
@@ -497,16 +504,16 @@ export default function GameCanvas() {
       arenaConnection.socket.emit("place_trap", { x: player.x + 34, y: 448, trapType });
     };
     const startGame = (selectedWorld: WorldIndex, selectedLevel = 1) => {
-      onlineMode = false; world = selectedWorld; currentLevel = selectedLevel; stage = stageFor(world, currentLevel, save); player = createPlayer(stage); cameraX = 0; screen = "playing"; demoTime = 0; music.start();
+      onlineMode = false; world = selectedWorld; currentLevel = selectedLevel; stage = stageFor(world, currentLevel, save); cameraX = 0; cameraY = 0; screen = "playing"; demoTime = 0; music.start();
     };
-    const resetLevel = () => { stage = stageFor(world, currentLevel, save); player = createPlayer(stage); cameraX = 0; screen = "playing"; demoTime = 0; };
+    const resetLevel = () => { stage = stageFor(world, currentLevel, save); player = createPlayer(stage); cameraX = 0; cameraY = 0; screen = "playing"; demoTime = 0; };
     const skipLevel = () => {
       if (!adminMode || onlineMode) return;
       player.x = stage.exitX;
       player.y = 390;
       player.vx = 0;
       player.vy = 0;
-      cameraX = Math.max(0, Math.min(stage.width - W, player.x - 275));
+      cameraX = Math.max(0, Math.min(stage.width - W, player.x - 275)); cameraY = Math.max(0, Math.min(stage.height - 432, player.y - 220));
       screen = "playing";
       adminToast = "Level skipped. Admin wahala no dey.";
       adminToastUntil = performance.now() + 2200;
@@ -525,7 +532,7 @@ export default function GameCanvas() {
       else if (world < 3) { save.unlocked = Math.max(save.unlocked, world + 1); world = (world + 1) as WorldIndex; currentLevel = 1; }
       save.progress[world] = Math.max(save.progress[world] || 0, currentLevel);
       persist(save);
-      stage = stageFor(world, currentLevel, save); player = createPlayer(stage); cameraX = 0;
+      stage = stageFor(world, currentLevel, save); player = createPlayer(stage); cameraX = 0; cameraY = 0;
       clearMessage = `${save.wardrobe.username} don survive this one! · WORLD ${world + 1} // LEVEL ${currentLevel}`;
       clearUntil = performance.now() + 1800; screen = "playing"; music.blip(740, 0.18);
     };
@@ -678,8 +685,10 @@ export default function GameCanvas() {
         if (disappearing) continue;
         const dropThrough = keysDown.has("arrowdown") || keysDown.has("s");
         const canLand = platform.kind !== "one-way" || (!dropThrough && player.vy >= 0 && prevBottom <= platform.y + 6);
-        if (player.vy >= 0 && canLand && prevBottom <= platform.y + 6 && player.y + player.h >= platform.y && player.x + player.w > platform.x && player.x < platform.x + platform.w) {
-          player.y = platform.y - player.h; player.vy = 0; player.grounded = true; player.coyote = 0.12; player.jumpsRemaining = 2;
+        const localX = Math.max(0, Math.min(1, (player.x + player.w / 2 - platform.x) / Math.max(1, platform.w)));
+        const surfaceY = platform.slope === "left" ? platform.y + platform.h * (1 - localX) : platform.slope === "right" ? platform.y + platform.h * localX : platform.y;
+        if (player.vy >= 0 && canLand && prevBottom <= surfaceY + 6 && player.y + player.h >= surfaceY && player.x + player.w > platform.x && player.x < platform.x + platform.w) {
+          player.y = surfaceY - player.h; player.vy = 0; player.grounded = true; player.coyote = 0.12; player.jumpsRemaining = 2;
           if (stage.mechanic === "sinking-ledges" && platform.y < 432) platform.y += Math.min(170, dt * 1700);
           if (stage.mechanic === "fade-platform" && platform.y < 432) platform.w = -1;
           if (stage.mechanic === "shrinking-platforms" && platform.y < 432) platform.w *= 0.8;
@@ -745,9 +754,10 @@ export default function GameCanvas() {
         if ((stage.mechanic === "key-lock-betrayal" && doorLockedByBetrayal) || (!stage.keys[0]?.collected && !adminMode)) { adminToast = stage.mechanic === "key-lock-betrayal" ? "That key was the lock. Avoid it." : "Key needed to Japa!"; adminToastUntil = now + 1500; music.blip(180, 0.12); player.x = Math.max(0, stage.exitX - 80); }
         else clearLevel();
       }
-      if (player.y > H + 55) die({ penalty: 50, label: "DIRTY GROUND" });
+      if (player.y > stage.height + 55 || player.y < -120) die({ penalty: 50, label: "VOID BOUNDARY" });
       player.x = Math.max(0, Math.min(stage.width - player.w, player.x));
       cameraX += (Math.max(0, Math.min(stage.width - W, player.x - 275)) - cameraX) * Math.min(1, dt * 7);
+      cameraY += (Math.max(0, Math.min(Math.max(0, stage.height - 432), player.y - 220)) - cameraY) * Math.min(1, dt * 7);
       shake = Math.max(0, shake - dt * 18);
     };
 
@@ -767,10 +777,12 @@ export default function GameCanvas() {
       drawBackground();
       ctx.save();
       ctx.beginPath(); ctx.rect(0, 0, W, 432); ctx.clip();
-      const jitter = shake ? Math.sin(now / 20) * shake : 0; ctx.translate(-cameraX + jitter, 0);
+      const jitter = shake ? Math.sin(now / 20) * shake : 0; ctx.translate(-cameraX + jitter, -cameraY);
       ctx.fillStyle = "#252124"; ctx.fillRect(0, 432, stage.width, 24);
       for (const platform of stage.platforms) {
-        ctx.fillStyle = platform.color || "#4f413c"; ctx.fillRect(platform.x, platform.y, platform.w, platform.h);
+        ctx.fillStyle = platform.color || "#4f413c";
+        if (platform.slope) { ctx.beginPath(); ctx.moveTo(platform.x, platform.y + (platform.slope === "left" ? platform.h : 0)); ctx.lineTo(platform.x + platform.w, platform.y + (platform.slope === "left" ? 0 : platform.h)); ctx.lineTo(platform.x + platform.w, platform.y + platform.h); ctx.lineTo(platform.x, platform.y + platform.h); ctx.closePath(); ctx.fill(); }
+        else ctx.fillRect(platform.x, platform.y, platform.w, platform.h);
         ctx.fillStyle = world === 1 ? "#b8413d" : world === 2 ? "#bf9c41" : "#8b725f"; ctx.fillRect(platform.x, platform.y, platform.w, 5);
         ctx.fillStyle = "rgba(7,8,10,.45)"; for (let x = platform.x + 10; x < platform.x + platform.w - 5; x += 27) ctx.fillRect(x, platform.y + 10, 12, 3);
       }

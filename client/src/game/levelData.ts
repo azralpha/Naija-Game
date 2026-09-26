@@ -9,7 +9,7 @@ export const RAGE_MECHANICS = [
   "gravity-zones", "jump-blackout", "moving-door", "contact-explosion", "fake-game-over", "backwind", "shifting-respawn", "tiny-platforms", "spike-wall-timer", "gauntlet",
 ] as const;
 export type RageMechanic = typeof RAGE_MECHANICS[number];
-export type LevelDefinition = { world: WorldIndex; level: number; name: string; mechanic: RageMechanic; map: string[]; platforms: LevelPlatform[]; hazards: LevelHazard[]; exitX: number; spawn: { x: number; y: number }; width: number };
+export type LevelDefinition = { world: WorldIndex; level: number; name: string; mechanic: RageMechanic; map: string[]; platforms: LevelPlatform[]; hazards: LevelHazard[]; exitX: number; spawn: { x: number; y: number }; width: number; height?: number };
 
 const WORLD_COLORS = ["#4f413c", "#5b262d", "#2e3d51", "#4a3568"];
 const WORLD_NAMES = ["Sapa Nation", "Shege Pro Max", "Trenches & Katakata", "Soft Life Protocol"];
