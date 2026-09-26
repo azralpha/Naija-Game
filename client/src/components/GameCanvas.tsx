@@ -443,8 +443,8 @@ export default function GameCanvas() {
     };
     const registerTitleTap = (now: number) => {
       titleTapTimes.push(now);
-      while (titleTapTimes.length && now - titleTapTimes[0] > 1500) titleTapTimes.shift();
-      if (titleTapTimes.length === 15) {
+      while (titleTapTimes.length && now - titleTapTimes[0] > 3000) titleTapTimes.shift();
+      if (titleTapTimes.length >= 15) {
         titleTapTimes.length = 0;
         enableAdminMode();
         sessionStorage.setItem("nnl-editor-admin", "true");
@@ -561,7 +561,7 @@ export default function GameCanvas() {
         return;
       }
       if (screen === "title") {
-        if (p.x >= 70 && p.x <= 450 && p.y >= 105 && p.y <= 275) registerTitleTap(performance.now());
+        if (p.x >= 60 && p.x <= 520 && p.y >= 80 && p.y <= 305) registerTitleTap(performance.now());
         if (p.x > 520 && p.y > 315 && p.y < 380) enterArena();
         else if (p.x >= 70 && p.x <= 470 && p.y > 315 && p.y < 380) screen = "worlds";
         else if (p.x >= 70 && p.x <= 430 && p.y > 380 && p.y < 430) screen = "options";
